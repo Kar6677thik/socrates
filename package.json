@@ -1,0 +1,49 @@
+{
+  "name": "socrates",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c gray,blue \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node --no-warnings --watch-path=src src/server/index.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "build": "vite build --config web/vite.config.ts",
+    "start": "node --no-warnings src/server/start.ts",
+    "mcp": "node --no-warnings src/mcp/stdio.ts",
+    "seed": "node --no-warnings src/core/seed.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --no-warnings --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.7",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "hono": "^4.13.18",
+    "ts-fsrs": "^6.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@tailwindcss/vite": "^4.3.5",
+    "@tanstack/react-query": "^5.107.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "concurrently": "^10.0.7",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.18.10",
+    "marked": "^18.2.0",
+    "marked-highlight": "^2.2.4",
+    "marked-katex-extension": "^5.1.13",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "wouter": "^3.13.0"
+  }
+}
