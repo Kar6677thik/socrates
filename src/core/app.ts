@@ -11,6 +11,11 @@ export type Undo =
   | { kind: 'delete_tags'; ids: number[] }
   | { kind: 'set_status'; items: { id: number; status: string }[] };
 
+export interface Preset {
+  name: string;
+  config: Record<string, unknown>;
+}
+
 /** Everything the server and MCP layers need, wired to one database. */
 export class App {
   db: DB;
@@ -82,7 +87,28 @@ export class App {
       reviews_per_day: getSetting(this.db, 'reviews_per_day', 200),
       retention: getSetting(this.db, 'retention', 0.9),
       agent_drafts: getSetting(this.db, 'agent_drafts', true),
+      leech_threshold: getSetting(this.db, 'leech_threshold', 6),
     };
+  }
+
+  /** Embed questions that have no vector yet, in the background. */
+  async backfillEmbeddings() {
+    try {
+      while ((await this.questions.backfillEmbeddings()) > 0);
+    } catch (e: any) {
+      console.error('[socrates] embedding backfill failed:', e.message);
+    }
+  }
+
+  presets(): Preset[] {
+    return getSetting<Preset[]>(this.db, 'presets', []);
+  }
+
+  savePresets(list: Preset[]) {
+    if (!Array.isArray(list) || list.length > 50) throw new Error('Invalid presets');
+    for (const p of list) if (typeof p?.name !== 'string' || !p.name.trim() || typeof p.config !== 'object') throw new Error('Each preset needs a name and config');
+    setSetting(this.db, 'presets', list.map((p) => ({ name: p.name.trim().slice(0, 60), config: p.config })));
+    return this.presets();
   }
 
   updateSettings(patch: Record<string, unknown>) {
@@ -91,6 +117,7 @@ export class App {
       reviews_per_day: (v) => Number.isInteger(v) && v >= 0 && v <= 10000,
       retention: (v) => typeof v === 'number' && v >= 0.7 && v <= 0.99,
       agent_drafts: (v) => typeof v === 'boolean',
+      leech_threshold: (v) => Number.isInteger(v) && v >= 2 && v <= 50,
     };
     for (const [k, v] of Object.entries(patch)) {
       if (!allowed[k]) throw new Error(`Unknown setting ${k}`);

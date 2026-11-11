@@ -209,3 +209,17 @@ Deviations from §2, chosen for a simpler Windows setup:
 - **wouter** instead of TanStack Router.
 - **Question similarity is lexical** (word/bigram/char-trigram cosine with an FTS5 prefilter), not embeddings. It catches rewordings and reorderings but not paraphrases with different words ("has an inverse" vs "is invertible"). **Local embeddings move to Phase 2.**
 - ChatGPT auth: the token can go in the URL path (`/mcp/t/<token>`) because ChatGPT connectors don't support a static bearer header. The app API refuses non-localhost Host headers, so a tunnel exposes only MCP.
+
+---
+
+## 13. Phase 2 as built (2026-11-11)
+
+Done: Elo/IRT calibration (`src/core/engine.ts`: per-tag ability with half-weight ancestors, per-question difficulty, shrinking step sizes), adaptive and weak-area modes (weighted mix of overdue-ness, weakness, closeness to 80% predicted success and novelty, under the daily new limit), recommendations ("Study next", also exposed as `get_recommendations`), leech flagging, undo, quiz presets, the analytics dashboard, and meaning-based duplicate checks with local embeddings.
+
+Recorded per attempt now: FSRS recall probability when shown, days since last review, the engine's predicted P(correct), and the engine state before the update (for undo).
+
+Findings that changed the design:
+- **Embeddings can't tell a statement from its converse.** MiniLM scores "every square matrix is invertible" vs "every invertible matrix is square" at 0.93, higher than a true paraphrase (0.87). So meaning matches only *flag* a possible duplicate, and only when the answers agree. Wording matches still reject.
+- **Weak mode picks leaf tags under 65% mastery** (parents only average their children), falling back to the single weakest tag.
+
+Not done (moved to later phases): FSRS weight optimization from your own history (Phase 4), per-question difficulty shown in the editor.

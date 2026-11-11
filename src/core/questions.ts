@@ -2,10 +2,37 @@ import { z } from 'zod';
 import { type DB, tx, now, getSetting } from './db.ts';
 import { Tags, type Suggestion } from './tags.ts';
 import { SPECS, QTYPES, type QType, checkSpec, answerKey, searchBody, publicSpec } from './qtypes.ts';
-import { contentHash, textVector, cosine, ftsQuery } from './text.ts';
+import { contentHash, textVector, cosine, ftsQuery, normalizeText } from './text.ts';
+import { embed, embedText, toBlob, fromBlob, dot } from './embed.ts';
 
 export const DUPLICATE_THRESHOLD = 0.92;
 export const NEAR_DUPLICATE_THRESHOLD = 0.85;
+/**
+ * Meaning-based matches never reject: embeddings score a statement and its converse
+ * ("every square matrix is invertible" / "every invertible matrix is square") as close as a
+ * paraphrase. So a meaning match only flags a possible duplicate, and only when answers agree.
+ */
+export const SEMANTIC_THRESHOLD = 0.85;
+export const SEMANTIC_ANY_ANSWER = 0.95;
+
+function coreAnswer(type: QType, spec: any): string {
+  switch (type) {
+    case 'mcq_single': return spec.options[spec.correct];
+    case 'mcq_multi': return spec.correct.map((i: number) => spec.options[i]).sort().join(' ');
+    case 'true_false': return String(spec.correct);
+    case 'fill_blank': return spec.blanks.map((b: any) => b.accept[0]).join(' ');
+    case 'numeric': return String(spec.answer);
+    case 'short_answer': return spec.model_answer;
+    case 'flashcard': return spec.back;
+  }
+}
+
+export function answersAgree(ta: QType, sa: any, tb: QType, sb: any): boolean {
+  const a = normalizeText(coreAnswer(ta, sa)), b = normalizeText(coreAnswer(tb, sb));
+  if (a === b) return true;
+  if ((ta === 'true_false') !== (tb === 'true_false')) return false;
+  return cosine(textVector(a), textVector(b)) >= 0.6;
+}
 export const MAX_BATCH = 100;
 
 const SPEC_FIELDS = [...new Set(Object.values(SPECS).flatMap((s) => Object.keys(s.shape)))];
@@ -58,6 +85,8 @@ export interface SimilarHit {
   id: number;
   similarity: number;
   prompt: string;
+  /** wording = lexical overlap; meaning = embedding similarity with agreeing answers */
+  match?: 'wording' | 'meaning';
 }
 
 function rowToQuestion(r: any, tags: Question['tags']): Question {
@@ -164,6 +193,49 @@ export class Questions {
       .slice(0, opts.limit ?? 5);
   }
 
+  private vecCache: Map<number, { v: Float32Array; type: QType; spec: any; prompt: string }> | null = null;
+
+  private vectors() {
+    if (!this.vecCache) {
+      this.vecCache = new Map();
+      const rows = this.db.prepare(`SELECT id, type, spec, prompt, embedding FROM questions WHERE embedding IS NOT NULL AND status != 'archived'`).all() as any[];
+      for (const r of rows) this.vecCache.set(r.id, { v: fromBlob(r.embedding), type: r.type, spec: JSON.parse(r.spec), prompt: r.prompt });
+    }
+    return this.vecCache;
+  }
+
+  /** Questions that mean the same thing (embedding similarity + agreeing answers). */
+  semanticSimilar(vec: Float32Array, type: QType, spec: any, opts: { excludeId?: number; limit?: number } = {}): SimilarHit[] {
+    const hits: SimilarHit[] = [];
+    for (const [id, c] of this.vectors()) {
+      if (id === opts.excludeId) continue;
+      const s = dot(vec, c.v);
+      if (s < SEMANTIC_THRESHOLD) continue;
+      if (s < SEMANTIC_ANY_ANSWER && !answersAgree(type, spec, c.type, c.spec)) continue;
+      hits.push({ id, similarity: +s.toFixed(3), prompt: c.prompt.length > 160 ? c.prompt.slice(0, 157) + '...' : c.prompt, match: 'meaning' });
+    }
+    return hits.sort((a, b) => b.similarity - a.similarity).slice(0, opts.limit ?? 5);
+  }
+
+  /** Embed prompts, then add. Use this from async callers; falls back to wording-only checks offline. */
+  async addAsync(items: unknown[], opts: Parameters<Questions['add']>[1] = {}) {
+    const texts = items.map((it: any) => (typeof it?.prompt === 'string' ? embedText(it.prompt) : ''));
+    const vecs = await embed(texts.map((t) => t || ' ')).catch(() => null);
+    return this.add(items, { ...opts, vectors: vecs ?? undefined });
+  }
+
+  /** Fill in missing embeddings (after edits, or questions added while the model was unavailable). */
+  async backfillEmbeddings(limit = 256): Promise<number> {
+    const rows = this.db.prepare(`SELECT id, prompt FROM questions WHERE embedding IS NULL AND status != 'archived' LIMIT ?`).all(limit) as { id: number; prompt: string }[];
+    if (!rows.length) return 0;
+    const vecs = await embed(rows.map((r) => embedText(r.prompt)));
+    if (!vecs) return 0;
+    const st = this.db.prepare('UPDATE questions SET embedding = ? WHERE id = ?');
+    rows.forEach((r, i) => st.run(toBlob(vecs[i]), r.id));
+    this.vecCache = null;
+    return rows.length;
+  }
+
   /** Resolve tag paths strictly. Returns tag ids or the unresolved paths with suggestions. */
   resolveTags(paths: string[]) {
     const ids: number[] = [];
@@ -180,11 +252,11 @@ export class Questions {
    * Bulk add. Each item succeeds or fails on its own. Never creates tags.
    * Order of checks: schema -> client_ref (idempotency) -> tags -> exact hash -> similarity.
    */
-  add(items: unknown[], opts: { actor?: string; dryRun?: boolean; status?: 'draft' | 'active' } = {}): AddResult[] {
+  add(items: unknown[], opts: { actor?: string; dryRun?: boolean; status?: 'draft' | 'active'; vectors?: (Float32Array | null)[] } = {}): AddResult[] {
     if (items.length > MAX_BATCH) throw new Error(`At most ${MAX_BATCH} questions per call (got ${items.length}). Split the batch.`);
     const actor = opts.actor ?? 'user';
     const status = opts.status ?? (actor.startsWith('agent') && getSetting(this.db, 'agent_drafts', true) ? 'draft' : 'active');
-    const batch: { type: QType; prompt: string; spec: any; hash: string; index: number }[] = [];
+    const batch: { type: QType; prompt: string; spec: any; hash: string; index: number; vec: Float32Array | null }[] = [];
     const results: AddResult[] = [];
 
     const run = () => {
@@ -212,25 +284,38 @@ export class Questions {
         if (exact)
           return results.push({ index, status: 'duplicate', duplicate_of: [{ id: exact.id, similarity: 1, prompt: exact.prompt }], note: 'Identical question already exists.' });
 
-        const hits = this.similar(q.type, q.prompt, spec);
+        const hits: SimilarHit[] = this.similar(q.type, q.prompt, spec).map((h) => ({ ...h, match: 'wording' }));
+        const vec = opts.vectors?.[index] ?? null;
         // Also compare against earlier items of this batch.
         const v1 = textVector(`${q.prompt}\n${answerKey(q.type, spec)}`);
         for (const b of batch) {
-          if (b.hash === hash) hits.unshift({ id: -1 - b.index, similarity: 1, prompt: `(item ${b.index} in this batch)` });
-          else {
-            const s = cosine(v1, textVector(`${b.prompt}\n${answerKey(b.type, b.spec)}`));
-            if (s >= NEAR_DUPLICATE_THRESHOLD) hits.push({ id: -1 - b.index, similarity: +s.toFixed(3), prompt: `(item ${b.index} in this batch)` });
+          const ref = { id: -1 - b.index, prompt: `(item ${b.index} in this batch)` };
+          if (b.hash === hash) { hits.unshift({ ...ref, similarity: 1, match: 'wording' }); continue; }
+          const s = cosine(v1, textVector(`${b.prompt}\n${answerKey(b.type, b.spec)}`));
+          if (s >= NEAR_DUPLICATE_THRESHOLD) hits.push({ ...ref, similarity: +s.toFixed(3), match: 'wording' });
+          else if (vec && b.vec) {
+            const m = dot(vec, b.vec);
+            if (m >= SEMANTIC_ANY_ANSWER || (m >= SEMANTIC_THRESHOLD && answersAgree(q.type, spec, b.type, b.spec)))
+              hits.push({ ...ref, similarity: +m.toFixed(3), match: 'meaning' });
           }
         }
+        if (vec)
+          for (const h of this.semanticSimilar(vec, q.type, spec)) {
+            // A meaning match outranks a weak (below-threshold) wording match on the same question.
+            const k = hits.findIndex((x) => x.id === h.id);
+            if (k < 0) hits.push(h);
+            else if (hits[k].similarity < NEAR_DUPLICATE_THRESHOLD) hits[k] = h;
+          }
         hits.sort((a, b) => b.similarity - a.similarity);
-        const dups = hits.filter((h) => h.similarity >= DUPLICATE_THRESHOLD);
+        // Only wording matches can reject; meaning matches are flagged for review.
+        const dups = hits.filter((h) => h.match === 'wording' && h.similarity >= DUPLICATE_THRESHOLD);
         if (dups.length)
           return results.push({
             index, status: 'duplicate', duplicate_of: dups,
             note: `Too similar (>= ${DUPLICATE_THRESHOLD}). Edit the existing question with update_question, or make this one test something different.`,
           });
-        const near = hits.filter((h) => h.similarity >= NEAR_DUPLICATE_THRESHOLD);
-        batch.push({ type: q.type, prompt: q.prompt, spec, hash, index });
+        const near = hits.filter((h) => h.match === 'meaning' || h.similarity >= NEAR_DUPLICATE_THRESHOLD);
+        batch.push({ type: q.type, prompt: q.prompt, spec, hash, index, vec });
 
         if (opts.dryRun) return results.push({ index, status: 'would_create', near_duplicates: near.length ? near : undefined, question_status: status });
 
@@ -248,6 +333,10 @@ export class Questions {
             hash, q.client_ref ?? null, actor, t, t,
           );
         const id = Number(info.lastInsertRowid);
+        if (vec) {
+          this.db.prepare('UPDATE questions SET embedding = ? WHERE id = ?').run(toBlob(vec), id);
+          this.vectors().set(id, { v: vec, type: q.type, spec, prompt: q.prompt });
+        }
         for (const tid of tagIds) this.db.prepare('INSERT INTO question_tags(question_id, tag_id) VALUES(?, ?)').run(id, tid);
         this.index(id, q.type, q.prompt, spec);
         this.snapshot(id, 'create', actor);
@@ -319,6 +408,8 @@ export class Questions {
       this.db.prepare('DELETE FROM question_tags WHERE question_id = ?').run(id);
       for (const tid of tagIds) this.db.prepare('INSERT INTO question_tags(question_id, tag_id) VALUES(?, ?)').run(id, tid);
       if (kind === 'major') this.db.prepare('DELETE FROM srs_cards WHERE question_id = ?').run(id);
+      if (q.prompt !== cur.prompt) this.db.prepare('UPDATE questions SET embedding = NULL WHERE id = ?').run(id); // re-embedded by backfill
+      this.vecCache = null;
       this.index(id, q.type, q.prompt, spec);
       this.snapshot(id, kind, opts.actor ?? 'user');
       return { question: this.get(id)!, edit_kind: kind, previous_version: cur.version, schedule_reset: kind === 'major' };
@@ -338,6 +429,7 @@ export class Questions {
       const stmt = this.db.prepare('UPDATE questions SET status = ?, updated_at = ? WHERE id = ?');
       let n = 0;
       for (const id of ids) n += Number(stmt.run(status, now(), id).changes);
+      this.vecCache = null;
       return n;
     });
   }

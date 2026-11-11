@@ -23,6 +23,10 @@
   --bad-soft: rgb(216 138 134 / 0.12);
   --warn: #cfb27a;
   --code-bg: #141418;
+  /* Charts: validated against the chart surface (dataviz lightness band + contrast). */
+  --chart-1: #7f8ae6;
+  --chart-ref: #8a8a94;
+  --chart-grid: #222227;
   color-scheme: dark;
 }
 
@@ -45,6 +49,9 @@
   --bad-soft: rgb(178 69 63 / 0.07);
   --warn: #8a6a2a;
   --code-bg: #f4f4f6;
+  --chart-1: #4d57c8;
+  --chart-ref: #8f8f99;
+  --chart-grid: #ededf0;
   color-scheme: light;
 }
 

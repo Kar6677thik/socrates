@@ -16,10 +16,12 @@ const Grades = lazy(() => import('./pages/Grades'));
 const Tags = lazy(() => import('./pages/Tags'));
 const Activity = lazy(() => import('./pages/Activity'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Analytics = lazy(() => import('./pages/Analytics'));
 
 const NAV: { href: string; label: string; key: string; badge?: (h: Home) => number }[] = [
   { href: '/', label: 'Home', key: 'h' },
   { href: '/study', label: 'Study', key: 's' },
+  { href: '/analytics', label: 'Analytics', key: 'y' },
   { href: '/library', label: 'Library', key: 'l' },
   { href: '/review', label: 'Drafts', key: 'd', badge: (h) => h.counts.drafts },
   { href: '/grades', label: 'Grading', key: 'g', badge: (h) => h.counts.pending },
@@ -93,16 +95,30 @@ function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="flex-1 min-w-0 overflow-y-auto">
+        <nav className="md:hidden sticky top-0 z-30 flex items-center gap-1 px-3 h-12 border-b border-line bg-bg/95 backdrop-blur overflow-x-auto">
+          <Link href="/" className="w-6 h-6 shrink-0 mr-1 rounded-md bg-elev border border-line-strong grid place-items-center font-serif text-[13px]">S</Link>
+          {NAV.map((n) => {
+            const active = n.href === '/' ? loc === '/' : loc.startsWith(n.href);
+            const badge = home && n.badge ? n.badge(home) : 0;
+            return (
+              <Link key={n.href} href={n.href} className={`shrink-0 h-8 px-2.5 rounded-md text-[13px] flex items-center gap-1.5 ${active ? 'bg-elev text-text' : 'text-muted'}`}>
+                {n.label.replace('Agent activity', 'Activity')}
+                {badge > 0 && <span className="text-[11px] text-accent tabular-nums">{badge}</span>}
+              </Link>
+            );
+          })}
+          <button onClick={toggleTheme} className="shrink-0 h-8 px-2.5 text-[13px] text-faint">{theme === 'dark' ? 'Light' : 'Dark'}</button>
+        </nav>
         <div className="max-w-[1040px] mx-auto px-8 py-8 max-md:px-4">{children}</div>
       </main>
       <Modal open={help} onClose={() => setHelp(false)} title="Keyboard shortcuts" wide>
         <div className="grid grid-cols-2 gap-x-10 gap-y-1 text-[13px]">
           {[
-            ['Go to page', 'g then h s l d g t a ,'], ['Toggle theme', '\\'], ['Start recommended session (home)', 'Enter'],
+            ['Go to page', 'g then h s y l d g t a ,'], ['Toggle theme', '\\'], ['Start recommended session (home)', 'Enter'],
             ['Search library', '/'], ['New question (library)', 'n'],
             ['— While studying —', ''], ['Pick option', '1–9'], ['True / false', 't  f'], ['Submit / next', 'Enter'],
             ['Submit written answer', 'Ctrl+Enter'], ['Reveal flashcard', 'Space'], ['Rate flashcard', '1–4'],
-            ['Confidence', 'q w e r  (Alt+1–4 while typing)'], ['Hint', 'h  (Alt+H)'], ['Flag question', 'x'], ['Skip', 's'], ['Edit question', 'e'], ['Leave session', 'Esc'],
+            ['Confidence', 'q w e r  (Alt+1–4 while typing)'], ['Hint', 'h  (Alt+H)'], ['Flag question', 'x'], ['Skip', 's'], ['Undo last answer', 'z'], ['Edit question', 'e'], ['Leave session', 'Esc'],
             ['— Drafts —', ''], ['Approve / reject', 'a  /  x'], ['Next / previous', 'j  /  k'], ['Edit', 'e'],
           ].map(([a, b], i) => (
             <div key={i} className={`flex justify-between py-1 ${b ? 'border-b border-line' : 'text-faint pt-3'}`}>
@@ -132,6 +148,7 @@ function App() {
           <Route path="/tags" component={Tags} />
           <Route path="/activity" component={Activity} />
           <Route path="/settings" component={Settings} />
+          <Route path="/analytics" component={Analytics} />
           <Route><div className="text-muted">Not found.</div></Route>
         </Switch>
       </Suspense>

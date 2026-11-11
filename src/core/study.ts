@@ -2,10 +2,21 @@ import { z } from 'zod';
 import { type DB, tx, now } from './db.ts';
 import { Questions, type Question } from './questions.ts';
 import { QTYPES, type QType, autoGrade, RESPONSES, AUTO_GRADED } from './qtypes.ts';
-import { studyDay, endOfStudyDay, limits, review, deriveRating, baselineMs, cardRetrievability, Rating } from './srs.ts';
+import { studyDay, endOfStudyDay, limits, review, deriveRating, baselineMs, cardRetrievability, loadCard, Rating } from './srs.ts';
+import { Engine, sigmoid, type EngineBefore } from './engine.ts';
+import { getSetting } from './db.ts';
+
+export const MODES = ['srs', 'adaptive', 'weak', 'practice'] as const;
+export type Mode = (typeof MODES)[number];
 
 export const SessionConfig = z.object({
-  mode: z.enum(['srs', 'practice']).default('srs'),
+  /**
+   * srs: due reviews + new within daily limits.
+   * adaptive: mixes due, weak and new, aiming for ~80% predicted success.
+   * weak: concentrates on the lowest-mastery tags.
+   * practice: weighted random sample.
+   */
+  mode: z.enum(MODES).default('srs'),
   tags: z.array(z.string()).optional(),
   types: z.array(z.enum(QTYPES as [QType, ...QType[]])).optional(),
   difficulty: z.tuple([z.number().int().min(1).max(5), z.number().int().min(1).max(5)]).optional(),
@@ -38,9 +49,70 @@ const SELF_RATING_SCORE = { 1: 0, 2: 0.6, 3: 0.9, 4: 1 } as const;
 export class Study {
   db: DB;
   q: Questions;
+  engine: Engine;
   constructor(db: DB, q: Questions) {
     this.db = db;
     this.q = q;
+    this.engine = new Engine(db);
+  }
+
+  /**
+   * Score every candidate on a weighted mix and take the best:
+   *   due      overdue-ness (1 - recall probability), boosted when actually due
+   *   weak     low mastery of the question's weakest tag
+   *   target   predicted success close to 80% (hard enough to learn from, not hopeless)
+   *   novelty  never seen (capped by the daily new limit)
+   * Questions answered in the last 10 minutes are skipped.
+   */
+  private adaptiveQueue(pool: number[], c: SessionConfig, at: number): number[] {
+    const W = c.mode === 'weak' ? { due: 0.4, weak: 1.6, target: 0.6, novelty: 0.2 } : { due: 1.0, weak: 0.6, target: 0.8, novelty: 0.5 };
+    const inPool = pool.join(',');
+    const cards = new Map(
+      (this.db.prepare(`SELECT question_id, card, due FROM srs_cards WHERE question_id IN (${inPool})`).all() as { question_id: number; card: string; due: number }[]).map((r) => [r.question_id, r]),
+    );
+    const recent = new Set((this.db.prepare(`SELECT DISTINCT question_id FROM attempts WHERE answered_at > ?`).all(at - 600_000) as { question_id: number }[]).map((r) => r.question_id));
+    const p = this.engine.predictMany(pool);
+    const mastery = this.engine.mastery();
+    const leafTags = new Map<number, number[]>();
+    for (const r of this.db.prepare(`SELECT question_id, tag_id FROM question_tags WHERE question_id IN (${inPool})`).all() as { question_id: number; tag_id: number }[])
+      leafTags.set(r.question_id, [...(leafTags.get(r.question_id) ?? []), r.tag_id]);
+    const horizon = endOfStudyDay(at);
+    let newLeft = Math.max(0, limits(this.db).new_per_day - this.todayCounts(at).new_seen);
+    const scored = pool
+      .filter((id) => !recent.has(id))
+      .map((id) => {
+        const card = cards.get(id);
+        const r = card ? cardRetrievability(JSON.parse(card.card), at) : 0;
+        const due = card ? (card.due <= horizon ? 1 + (1 - r) : (1 - r) * 0.5) : 0;
+        const tagMastery = (leafTags.get(id) ?? []).map((t) => mastery.get(t)).filter((m) => m && m.n >= 3).map((m) => m!.mastery);
+        const weak = tagMastery.length ? 1 - Math.min(...tagMastery) : 0.4;
+        const pred = p.get(id) ?? 0.5;
+        const target = 1 - Math.min(1, Math.abs(pred - 0.8) / 0.4);
+        const novelty = card ? 0 : 1;
+        return { id, isNew: !card, score: W.due * due + W.weak * weak + W.target * target + W.novelty * novelty + Math.random() * 0.15 };
+      })
+      .sort((a, b) => b.score - a.score);
+    const out: number[] = [];
+    for (const s of scored) {
+      if (out.length >= (c.limit ?? 20)) break;
+      if (s.isNew) { if (newLeft <= 0 || c.include_new === false) continue; newLeft--; }
+      out.push(s.id);
+    }
+    return this.interleave(out);
+  }
+
+  /** Weakest tags (lowest mastery with enough evidence) as paths. */
+  weakestTagPaths(n = 3): string[] {
+    // Leaf tags only (parents just average their children), below 65% mastery; else the single weakest.
+    const rows = this.db
+      .prepare(
+        `SELECT t.path, a.theta FROM ability a JOIN tags t ON t.id = a.tag_id
+         WHERE t.merged_into_id IS NULL AND a.n >= 3 AND NOT EXISTS (SELECT 1 FROM tags c WHERE c.parent_id = t.id AND c.merged_into_id IS NULL)
+         ORDER BY a.theta ASC`,
+      )
+      .all() as { path: string; theta: number }[];
+    const weak = rows.filter((r) => sigmoid(r.theta) < 0.65).slice(0, n);
+    return (weak.length ? weak : rows.slice(0, 1)).map((r) => r.path);
   }
 
   /** Active, unflagged question ids matching the filters. */
@@ -76,8 +148,13 @@ export class Study {
 
   /** Build the ordered question queue for a session. */
   buildQueue(c: SessionConfig, at = now()): number[] {
+    if (c.mode === 'weak' && !c.tags?.length && !c.question_ids?.length) {
+      const weakest = this.weakestTagPaths(5);
+      if (weakest.length) c = { ...c, tags: weakest };
+    }
     const pool = this.pool(c);
     if (!pool.length) return [];
+    if (c.mode === 'adaptive' || c.mode === 'weak') return this.adaptiveQueue(pool, c, at);
     const inPool = pool.join(',');
     if (c.mode === 'practice') {
       const stats = new Map(
@@ -212,25 +289,39 @@ export class Study {
         gradeStatus = 'pending';
       }
 
+      // What the models expected before this answer (for forgetting curves and calibration).
+      const prev = loadCard(this.db, q.id);
+      const rPred = prev.isNew ? null : cardRetrievability(prev.card, a.shown_at);
+      const elapsedDays = !prev.isNew && prev.card.last_review ? (a.shown_at - new Date(prev.card.last_review).getTime()) / 864e5 : null;
+      let pPred = this.engine.predict(q.id);
+      let engineBefore: EngineBefore | null = null;
+
       let rating: number | null = null;
       let srs: ReturnType<typeof review> | null = null;
+      let leech = false;
       if (score !== null) {
         rating = q.type === 'flashcard' && a.self_rating
           ? a.self_rating
           : deriveRating({ score, time_ms: a.time_ms, confidence: a.confidence, hints_used: a.hints_used, baseline_ms: baselineMs(this.db, q.id, q.type) });
         srs = review(this.db, q.id, rating as any, at);
+        const e = this.engine.update(q.id, score);
+        pPred = e.p;
+        engineBefore = e.before;
+        leech = this.checkLeech(q.id);
       }
       const shown = new Date(a.shown_at);
       const info = this.db
         .prepare(
           `INSERT INTO attempts(question_id, question_version, session_id, response, is_correct, score, grade_status, confidence,
-             hints_used, time_ms, first_input_ms, answer_changes, shown_at, answered_at, local_hour, weekday, study_day, rating, srs_before)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             hints_used, time_ms, first_input_ms, answer_changes, shown_at, answered_at, local_hour, weekday, study_day, rating, srs_before,
+             r_pred, p_pred, elapsed_days, engine_before)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           q.id, q.version, a.session_id ?? null, JSON.stringify(resp.data), correct === null ? null : correct ? 1 : 0, score, gradeStatus,
           a.confidence ?? null, a.hints_used, a.time_ms, a.first_input_ms ?? null, a.answer_changes, a.shown_at, at,
           shown.getHours(), shown.getDay(), studyDay(a.shown_at), rating, srs?.before ?? null,
+          rPred, pPred, elapsedDays, engineBefore ? JSON.stringify(engineBefore) : null,
         );
       const attemptId = Number(info.lastInsertRowid);
       if (a.events?.length) {
@@ -247,7 +338,43 @@ export class Study {
         next_due: srs?.due ?? null,
         answer: q.spec,
         explanation: q.explanation,
+        predicted: +pPred.toFixed(3),
+        leech,
       };
+    });
+  }
+
+  /** Auto-suspend questions forgotten too often: they need rewriting, not more reviews. */
+  private checkLeech(questionId: number): boolean {
+    const threshold = getSetting(this.db, 'leech_threshold', 6);
+    const row = this.db.prepare('SELECT c.lapses, q.flagged_reason FROM srs_cards c JOIN questions q ON q.id = c.question_id WHERE c.question_id = ?').get(questionId) as
+      | { lapses: number; flagged_reason: string | null }
+      | undefined;
+    if (!row || row.lapses < threshold || row.flagged_reason) return false;
+    this.db.prepare('UPDATE questions SET flagged_reason = ? WHERE id = ?').run(`Leech: forgotten ${row.lapses} times. Rewrite it or split it into smaller questions.`, questionId);
+    return true;
+  }
+
+  /** Undo the most recent attempt: restores the schedule and calibration as they were. */
+  undo(attemptId: number) {
+    return tx(this.db, () => {
+      const last = this.db.prepare('SELECT MAX(id) id FROM attempts').get() as { id: number };
+      if (last.id !== attemptId) throw new Error('Only the most recent answer can be undone.');
+      const a = this.db.prepare('SELECT * FROM attempts WHERE id = ?').get(attemptId) as any;
+      if (a.rating !== null) {
+        if (a.srs_before) {
+          const c = JSON.parse(a.srs_before);
+          this.db.prepare('UPDATE srs_cards SET card = ?, due = ?, state = ?, reps = ?, lapses = ?, last_review = ? WHERE question_id = ?')
+            .run(a.srs_before, new Date(c.due).getTime(), c.state, c.reps, c.lapses, c.last_review ? new Date(c.last_review).getTime() : null, a.question_id);
+        } else this.db.prepare('DELETE FROM srs_cards WHERE question_id = ?').run(a.question_id);
+      }
+      if (a.engine_before) this.engine.restore(a.question_id, JSON.parse(a.engine_before));
+      // A leech flag set by this answer goes too.
+      this.db.prepare(`UPDATE questions SET flagged_reason = NULL WHERE id = ? AND flagged_reason LIKE 'Leech:%'`).run(a.question_id);
+      this.db.prepare('DELETE FROM attempt_events WHERE attempt_id = ?').run(attemptId);
+      this.db.prepare('DELETE FROM grades WHERE attempt_id = ?').run(attemptId);
+      this.db.prepare('DELETE FROM attempts WHERE id = ?').run(attemptId);
+      return { undone: attemptId, question_id: a.question_id };
     });
   }
 
@@ -275,6 +402,14 @@ export class Study {
         const r = review(this.db, q.id, rating, a.answered_at > now() - 864e5 * 2 ? now() : a.answered_at);
         if (wasPending) srsBefore = r.before;
       }
+      let engineBefore = a.engine_before;
+      if (wasPending) {
+        const e = this.engine.update(q.id, score);
+        engineBefore = JSON.stringify(e.before);
+        this.db.prepare('UPDATE attempts SET p_pred = ? WHERE id = ?').run(e.p, attemptId);
+        this.checkLeech(q.id);
+      } else this.engine.adjust(q.id, score - (a.score ?? 0));
+      this.db.prepare('UPDATE attempts SET engine_before = ? WHERE id = ?').run(engineBefore, attemptId);
       this.db
         .prepare(`UPDATE attempts SET score = ?, is_correct = ?, grade_status = ?, rating = ?, srs_before = ? WHERE id = ?`)
         .run(score, score >= 0.8 ? 1 : 0, g.grader === 'self' ? 'self' : 'graded', rating, srsBefore, attemptId);

@@ -4,6 +4,7 @@ import type { App, Undo } from '../core/app.ts';
 import { QTYPES, TYPE_LABELS, type QType } from '../core/qtypes.ts';
 import { TagError } from '../core/tags.ts';
 import { MAX_BATCH, DUPLICATE_THRESHOLD, NEAR_DUPLICATE_THRESHOLD } from '../core/questions.ts';
+import { embed, embedText } from '../core/embed.ts';
 
 export const APP_URL = process.env.SOCRATES_URL ?? 'http://localhost:4321';
 
@@ -18,13 +19,13 @@ Tagging rules (enforced by the server):
 
 Question rules:
 - Every question needs at least one tag; prefer 2-4 specific leaf tags over broad ones.
-- Duplicates (similarity >= ${DUPLICATE_THRESHOLD}) are rejected; near duplicates (>= ${NEAR_DUPLICATE_THRESHOLD}) are accepted but flagged. Use check_duplicates or dry_run=true for large batches.
+- Wording duplicates (similarity >= ${DUPLICATE_THRESHOLD}) are rejected; near duplicates (>= ${NEAR_DUPLICATE_THRESHOLD}) are accepted but flagged. Questions that mean the same thing with the same answer (match "meaning") are also flagged: review them and archive one if they test the same fact. Use check_duplicates or dry_run=true for large batches.
 - Set client_ref on each item (any stable string) so retries never create duplicates.
 - Questions you add start as drafts until the user approves them in the app.
 
 Grading: list_pending_grades returns free-text answers awaiting a grade. Grade against the model answer and rubric, then submit_grades with score 0..1, rubric_scores and concise feedback (what was right, what was missing, the misconception if any).
 
-Targeting: get_weak_areas, get_recent_mistakes and get_coverage_gaps tell you what to write next.`;
+Targeting: get_recommendations, get_weak_areas (calibrated mastery), get_recent_mistakes and get_coverage_gaps tell you what to write next. Aim new questions slightly above the user's level: difficulty is calibrated from real answers, so the 1-5 you set is only a starting point.`;
 
 const TYPE_DOC = `Types and their fields (in addition to type, prompt, tags, difficulty, explanation, hints, source, group_id, client_ref):
 - mcq_single: options (string[] 2-10), correct (0-based index), shuffle? (default true)
@@ -50,9 +51,10 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
   const actor = () => `agent:${server.server.getClientVersion()?.name ?? opts.fallbackClient ?? 'unknown'}`;
 
   /** Wrap a write tool: catch errors and write an audit entry. */
-  const write = <A>(tool: string, fn: (args: A) => { result: unknown; undo?: Undo | null }) => async (args: A) => {
+  type Out = { result: unknown; undo?: Undo | null };
+  const write = <A>(tool: string, fn: (args: A) => Out | Promise<Out>) => async (args: A) => {
     try {
-      const { result, undo } = fn(args);
+      const { result, undo } = await fn(args);
       app.audit(actor(), tool, args, result, undo ?? null);
       return json(result);
     } catch (e: any) {
@@ -61,7 +63,7 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
   };
   const read = <A>(fn: (args: A) => unknown) => async (args: A) => {
     try {
-      return json(fn(args));
+      return json(await fn(args));
     } catch (e: any) {
       return fail(e.message, e.details);
     }
@@ -219,8 +221,8 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
         dry_run: z.boolean().optional().describe('Validate, resolve tags and check duplicates without saving'),
       },
     },
-    write('add_questions', ({ items, dry_run }: { items: unknown[]; dry_run?: boolean }) => {
-      const results = app.questions.add(items, { actor: actor(), dryRun: dry_run });
+    write('add_questions', async ({ items, dry_run }: { items: unknown[]; dry_run?: boolean }) => {
+      const results = await app.questions.addAsync(items, { actor: actor(), dryRun: dry_run });
       const ids = results.filter((r) => r.status === 'created').map((r: any) => r.id as number);
       const summary: Record<string, number> = {};
       for (const r of results) summary[r.status] = (summary[r.status] ?? 0) + 1;
@@ -238,12 +240,18 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
       },
       annotations: { readOnlyHint: true },
     },
-    read(({ items }: { items: { type?: QType; prompt: string; answer_text?: string }[] }) => ({
-      results: items.map((it) => ({
-        prompt: it.prompt,
-        similar: app.questions.similar(it.type ?? 'flashcard', it.prompt, { back: it.answer_text ?? '' }),
-      })),
-    })),
+    read(async ({ items }: { items: { type?: QType; prompt: string; answer_text?: string }[] }) => {
+      const vecs = await embed(items.map((it) => embedText(it.prompt))).catch(() => null);
+      return {
+        results: items.map((it, i) => {
+          const spec = { back: it.answer_text ?? '' };
+          const wording = app.questions.similar(it.type ?? 'flashcard', it.prompt, spec).map((h) => ({ ...h, match: 'wording' }));
+          // Without an answer to compare, report close meaning matches regardless of answer.
+          const meaning = vecs ? app.questions.semanticSimilar(vecs[i], 'flashcard', spec).concat() : [];
+          return { prompt: it.prompt, similar: [...wording, ...meaning.filter((m) => !wording.some((w) => w.id === m.id))].sort((a, b) => b.similarity - a.similarity).slice(0, 8) };
+        }),
+      };
+    }),
   );
 
   server.registerTool(
@@ -260,6 +268,7 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
     },
     write('update_question', ({ id, changes, edit_kind }: { id: number; changes: Record<string, unknown>; edit_kind?: 'minor' | 'major' }) => {
       const r = app.questions.update(id, changes, { actor: actor(), editKind: edit_kind });
+      app.backfillEmbeddings();
       return {
         result: { id, version: r.question.version, edit_kind: r.edit_kind, schedule_reset: r.schedule_reset },
         undo: { kind: 'restore_version', id, version: r.previous_version },
@@ -391,11 +400,23 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
     'get_weak_areas',
     {
       title: 'Weak areas',
-      description: 'Tags with the lowest recent accuracy, with attempt counts, speed and confidently-wrong counts (misconceptions).',
-      inputSchema: { limit: z.number().int().min(1).max(50).optional(), min_attempts: z.number().int().min(1).optional(), days: z.number().int().optional() },
+      description:
+        'Tags with the lowest mastery. mastery = calibrated probability of answering an average-difficulty question correctly (adjusts for question difficulty, unlike raw accuracy). Includes recent accuracy, trend (14-day change), speed and confidently-wrong counts (misconceptions).',
+      inputSchema: { limit: z.number().int().min(1).max(50).optional(), min_attempts: z.number().int().min(1).optional() },
       annotations: { readOnlyHint: true },
     },
-    read(({ limit, min_attempts, days }: { limit?: number; min_attempts?: number; days?: number }) => ({ weak: app.stats.weakTags(limit ?? 10, min_attempts ?? 3, days ?? 60) })),
+    read(({ limit, min_attempts }: { limit?: number; min_attempts?: number }) => ({ weak: app.stats.tagMastery({ minAttempts: min_attempts ?? 3 }).slice(0, limit ?? 10) })),
+  );
+
+  server.registerTool(
+    'get_recommendations',
+    {
+      title: 'Study recommendations',
+      description: 'What the user should study next and why (due reviews, weak or fading tags, overconfidence, untouched topics, thin coverage). Items of kind "agent" are things you can do: write more questions.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    read(() => ({ recommendations: app.stats.recommendations(8) })),
   );
 
   server.registerTool(
@@ -426,9 +447,10 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
     'create_quiz',
     {
       title: 'Create quiz',
-      description: 'Create a study session and return a link the user can open. mode "srs" = due reviews + new; "practice" = sample weighted toward weak questions.',
+      description:
+        'Create a study session and return a link the user can open. Modes: "srs" = due reviews + new; "adaptive" (default) = mix of due, weak and new aimed at ~80% predicted success; "weak" = concentrate on lowest-mastery tags; "practice" = weighted random sample.',
       inputSchema: {
-        mode: z.enum(['srs', 'practice']).optional(),
+        mode: z.enum(['srs', 'adaptive', 'weak', 'practice']).optional(),
         tags: z.array(z.string()).optional(),
         types: z.array(typeEnum).optional(),
         difficulty: z.tuple([z.number().int(), z.number().int()]).optional(),
@@ -437,7 +459,7 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
       },
     },
     write('create_quiz', (args: any) => {
-      const s = app.study.startSession({ mode: 'practice', ...args });
+      const s = app.study.startSession({ mode: 'adaptive', ...args });
       return { result: { session_id: s.session_id, questions: s.questions.length, url: `${APP_URL}/study/${s.session_id}` } };
     }),
   );

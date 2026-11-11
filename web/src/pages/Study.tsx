@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
-import { api, useApi, invalidate, pct, fmtMs, fmtDue, tagLabel, useTagNames, TYPES, TYPE_LABELS, type PublicQuestion, type SubmitResult, type QType, type Home } from '../lib/api';
+import { api, useApi, invalidate, pct, fmtMs, fmtDue, tagLabel, useTagNames, TYPES, TYPE_LABELS, MODE_LABELS, type PublicQuestion, type SubmitResult, type QType, type Home, type Mode } from '../lib/api';
 import { Md } from '../lib/md';
 import { useKeys } from '../lib/keys';
 import { Button, Chip, Kbd, Segmented, Field, Modal, toast, Card } from '../components/ui';
@@ -13,42 +13,73 @@ export default function StudyPage({ sessionId }: { sessionId?: number }) {
 
 // ---------------------------------------------------------------- Builder
 
+const MODE_HELP: Record<Mode, string> = {
+  srs: 'Questions due today, lowest recall first, plus new questions within your daily limit.',
+  adaptive: 'A mix of due, weak and new questions, picked so you get about 80% right: hard enough to learn from.',
+  weak: 'Concentrates on your lowest-mastery tags. Leave tags empty to let the engine pick them.',
+  practice: 'A sample weighted toward questions you miss and ones you have not seen.',
+};
+
+interface Preset { name: string; config: Record<string, any> }
+
 function Builder() {
   const [, nav] = useLocation();
   const { data: h } = useApi<Home>('/home');
-  const [mode, setMode] = useState<'srs' | 'practice'>('srs');
+  const { data: presets = [], refetch } = useApi<Preset[]>('/presets');
+  const [mode, setMode] = useState<Mode>('srs');
   const [tags, setTags] = useState<string[]>([]);
   const [types, setTypes] = useState<QType[]>([]);
   const [diff, setDiff] = useState<number[]>([]);
   const [limit, setLimit] = useState(20);
+  const [naming, setNaming] = useState<string | null>(null);
   const toggle = <T,>(list: T[], v: T) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
-  const go = () =>
-    startSession(nav, {
-      mode,
-      tags: tags.length ? tags : undefined,
-      types: types.length ? types : undefined,
-      difficulty: diff.length ? [Math.min(...diff), Math.max(...diff)] : undefined,
-      limit: mode === 'practice' ? limit : undefined,
-    });
-  useKeys({ 'mod+Enter': go, Enter: go });
+  const config = () => ({
+    mode,
+    tags: tags.length ? tags : undefined,
+    types: types.length ? types : undefined,
+    difficulty: diff.length ? [Math.min(...diff), Math.max(...diff)] : undefined,
+    limit: mode === 'srs' ? undefined : limit,
+  });
+  const go = () => startSession(nav, config());
+  const load = (p: Preset) => {
+    const c = p.config;
+    setMode(c.mode ?? 'adaptive');
+    setTags(c.tags ?? []);
+    setTypes(c.types ?? []);
+    setDiff(c.difficulty ? Array.from({ length: c.difficulty[1] - c.difficulty[0] + 1 }, (_, i) => c.difficulty[0] + i) : []);
+    setLimit(c.limit ?? 20);
+  };
+  const savePresets = async (list: Preset[]) => {
+    try { await api.put('/presets', list); refetch(); } catch (e: any) { toast(e.message, 'bad'); }
+  };
+  useKeys({ 'mod+Enter': go, Enter: () => { if (naming === null) go(); } });
 
   return (
     <div className="max-w-2xl fade-in">
       <h1 className="text-[19px] font-semibold tracking-[-0.01em] mb-6">New session</h1>
+      {presets.length > 0 && (
+        <div className="mb-6">
+          <div className="text-[12.5px] font-medium text-muted mb-1.5">Presets</div>
+          <div className="flex flex-wrap gap-1.5">
+            {presets.map((p, i) => (
+              <span key={i} className="group inline-flex items-center h-7 rounded-md border border-line hover:border-line-strong text-[12.5px]">
+                <button className="pl-2.5 pr-1.5 h-full" onClick={() => load(p)} onDoubleClick={() => startSession(nav, p.config)} title="Click to load, double-click to start">{p.name}</button>
+                <button className="pr-2 text-faint hover:text-text opacity-0 group-hover:opacity-100" onClick={() => savePresets(presets.filter((_, j) => j !== i))} aria-label={`Delete preset ${p.name}`}>×</button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="space-y-6">
         <Segmented
           value={mode}
           onChange={setMode}
-          options={[
-            { value: 'srs', label: `Spaced review${h ? ` · ${h.due + h.new_available}` : ''}` },
-            { value: 'practice', label: 'Practice' },
-          ]}
+          options={(['srs', 'adaptive', 'weak', 'practice'] as Mode[]).map((m) => ({
+            value: m,
+            label: m === 'srs' && h ? `${MODE_LABELS[m]} · ${h.due + h.new_available}` : MODE_LABELS[m],
+          }))}
         />
-        <p className="text-muted -mt-3 text-[13px]">
-          {mode === 'srs'
-            ? 'Questions due today, lowest recall first, plus new questions within your daily limit. Answers update the review schedule.'
-            : 'A sample weighted toward questions you get wrong and ones you have not seen. Answers still update the schedule.'}
-        </p>
+        <p className="text-muted -mt-3 text-[13px]">{MODE_HELP[mode]} Every answer updates your schedule and mastery.</p>
         <Field label="Tags" hint="Includes all subtags. Leave empty for everything.">
           <TagInput value={tags} onChange={setTags} placeholder="All tags" allowCreate={false} />
         </Field>
@@ -62,14 +93,27 @@ function Builder() {
             {[1, 2, 3, 4, 5].map((d) => <Chip key={d} active={diff.includes(d)} onClick={() => setDiff(toggle(diff, d))}>{d}</Chip>)}
           </div>
         </Field>
-        {mode === 'practice' && (
+        {mode !== 'srs' && (
           <Field label="Questions">
             <div className="flex gap-1.5">
               {[10, 20, 40, 80].map((n) => <Chip key={n} active={limit === n} onClick={() => setLimit(n)}>{n}</Chip>)}
             </div>
           </Field>
         )}
-        <Button variant="primary" size="lg" kbd="↵" onClick={go}>Start</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="primary" size="lg" kbd="↵" onClick={go}>Start</Button>
+          {naming === null ? (
+            <Button variant="ghost" size="lg" onClick={() => setNaming('')}>Save as preset</Button>
+          ) : (
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(e) => { e.preventDefault(); if (naming.trim()) { savePresets([...presets, { name: naming, config: config() }]); toast('Preset saved'); } setNaming(null); }}
+            >
+              <input autoFocus className="field h-10 w-48" placeholder="Preset name" value={naming} onChange={(e) => setNaming(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setNaming(null)} />
+              <Button type="submit" size="lg">Save</Button>
+            </form>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -126,10 +170,21 @@ function Runner({ sessionId }: { sessionId: number }) {
   const [idx, setIdx] = useState(0);
   const [done, setDone] = useState<Done[]>([]);
   const [finished, setFinished] = useState(false);
+  const [mount, setMount] = useState(0);
 
   useEffect(() => {
     if (data && !queue) setQueue(data.questions);
   }, [data, queue]);
+
+  /** Undo an answer: the server restores schedule + calibration, and the question is shown again fresh. */
+  const undo = async (attemptId: number, stepBack: boolean) => {
+    try {
+      await api.post(`/attempts/${attemptId}/undo`);
+      if (stepBack) { setDone((d) => d.slice(0, -1)); setIdx((i) => i - 1); }
+      setMount((m) => m + 1);
+      toast('Answer undone');
+    } catch (e: any) { toast(e.message, 'bad'); }
+  };
 
   const finish = useCallback(async () => {
     setFinished(true);
@@ -144,11 +199,13 @@ function Runner({ sessionId }: { sessionId: number }) {
   const q = queue[idx];
   return (
     <Question
-      key={`${q.id}-${idx}`}
+      key={`${q.id}-${idx}-${mount}`}
       q={q}
       sessionId={sessionId}
       position={idx}
       total={queue.length}
+      onUndo={(attemptId) => undo(attemptId, false)}
+      onUndoPrevious={done.length ? () => undo(done[done.length - 1].result.attempt_id, true) : undefined}
       onDone={(d) => { setDone((x) => [...x, d]); setIdx((i) => i + 1); }}
       onSkip={() => { setQueue((qs) => [...qs!, qs![idx]]); setIdx((i) => i + 1); }}
       onDrop={() => { setQueue((qs) => qs!.filter((_, i) => i !== idx)); }}
@@ -158,10 +215,11 @@ function Runner({ sessionId }: { sessionId: number }) {
 }
 
 function Question({
-  q, sessionId, position, total, onDone, onSkip, onDrop, onExit,
+  q, sessionId, position, total, onDone, onSkip, onDrop, onExit, onUndo, onUndoPrevious,
 }: {
   q: PublicQuestion; sessionId: number; position: number; total: number;
   onDone: (d: Done) => void; onSkip: () => void; onDrop: () => void; onExit: () => void;
+  onUndo: (attemptId: number) => void; onUndoPrevious?: () => void;
 }) {
   const names = useTagNames();
   // ---- tracking
@@ -244,6 +302,7 @@ function Question({
         confidence, events: events.current, ...extra,
       });
       setResult(r);
+      if (r.leech) toast('You keep missing this one, so it is set aside. Rewrite or split it from the library.', 'neutral', { label: 'Edit', run: () => window.open(`/library/${q.id}`, '_blank') });
       (document.activeElement as HTMLElement | null)?.blur();
       if (q.type === 'flashcard') onDone({ q, result: r, time_ms });
     } catch (e: any) {
@@ -302,6 +361,11 @@ function Question({
     x: () => setFlagOpen(true),
     s: () => { if (!result) onSkip(); },
     e: () => { window.open(`/library/${q.id}`, '_blank'); },
+    z: () => {
+      if (result) onUndo(result.attempt_id);
+      else if (firstInput.current === null && onUndoPrevious) onUndoPrevious();
+      else return false;
+    },
   };
   for (const c of CONF) { keys[c.key] = () => setConf(c.v); keys[`alt+${c.v}`] = () => setConf(c.v); }
   for (let i = 1; i <= 9; i++) {
@@ -334,7 +398,7 @@ function Question({
         <div className="tabular-nums w-16 text-right">{elapsed < 60_000 ? `${Math.floor(elapsed / 1000)}s` : fmtMs(Math.floor(elapsed / 1000) * 1000)}</div>
       </header>
 
-      <div className="flex-1 w-full max-w-[720px] mx-auto px-6 pt-[6vh] pb-24 fade-in">
+      <div className="flex-1 w-full max-w-[720px] mx-auto px-6 max-sm:px-4 pt-[6vh] pb-24 fade-in">
         <div className="flex items-center gap-2 text-[12px] text-faint mb-4 flex-wrap">
           <span>{TYPE_LABELS[q.type]}</span>
           <span>·</span>
@@ -455,9 +519,9 @@ function Question({
       </div>
 
       <footer className="sticky bottom-0 border-t border-line bg-bg/95 backdrop-blur">
-        <div className="max-w-[720px] mx-auto px-6 h-14 flex items-center gap-3">
+        <div className="max-w-[720px] mx-auto px-6 max-sm:px-4 min-h-14 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
           {!result && q.type !== 'flashcard' && (
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 max-sm:w-full max-sm:justify-between">
               {CONF.map((c) => (
                 <button key={c.v} onClick={() => setConf(c.v)} className={`h-7 px-2 rounded-md text-[12px] flex items-center gap-1.5 transition-colors ${confidence === c.v ? 'bg-elev text-text shadow-[inset_0_0_0_1px_var(--line-strong)]' : 'text-faint hover:text-muted'}`}>
                   <span className="font-mono text-[10.5px] opacity-70">{c.key}</span>{c.label}
@@ -476,6 +540,7 @@ function Question({
             {!result && q.type !== 'flashcard' && (
               <Button variant="primary" onClick={() => submit()} disabled={!hasAnswer || busy} kbd={q.type === 'short_answer' ? 'Ctrl ↵' : '↵'}>Check</Button>
             )}
+            {result && q.type !== 'flashcard' && <Button variant="ghost" size="sm" onClick={() => onUndo(result.attempt_id)} kbd="z">Undo</Button>}
             {result && q.type !== 'flashcard' && <Button variant="primary" onClick={next} kbd="↵">{position + 1 === total ? 'Finish' : 'Next'}</Button>}
           </div>
         </div>

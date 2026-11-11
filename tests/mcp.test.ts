@@ -1,3 +1,4 @@
+process.env.SOCRATES_EMBEDDINGS ??= 'off'; // wording-only here; meaning checks are in engine.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

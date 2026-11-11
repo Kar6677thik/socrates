@@ -106,12 +106,14 @@ api.get('/questions/:id', (c) => {
 });
 api.post('/questions', async (c) => {
   const b = await c.req.json();
-  return c.json(app.questions.add(Array.isArray(b) ? b : b.items ?? [b], { actor: 'user', dryRun: b.dry_run }));
+  return c.json(await app.questions.addAsync(Array.isArray(b) ? b : b.items ?? [b], { actor: 'user', dryRun: b.dry_run }));
 });
 api.patch('/questions/:id', async (c) => {
   const b = await c.req.json();
   const { edit_kind, ...patch } = b;
-  return c.json(app.questions.update(num(c.req.param('id')), patch, { editKind: edit_kind }));
+  const r = app.questions.update(num(c.req.param('id')), patch, { editKind: edit_kind });
+  app.backfillEmbeddings();
+  return c.json(r);
 });
 api.post('/questions/status', async (c) => {
   const b = await c.req.json();
@@ -129,6 +131,11 @@ api.post('/sessions', async (c) => c.json(app.study.startSession(await c.req.jso
 api.get('/sessions/:id', (c) => c.json(app.study.loadSession(num(c.req.param('id')))));
 api.post('/sessions/:id/end', (c) => c.json(app.study.endSession(num(c.req.param('id')))));
 api.post('/attempts', async (c) => c.json(app.study.submit(await c.req.json())));
+api.post('/attempts/:id/undo', (c) => c.json(app.study.undo(num(c.req.param('id')))));
+api.get('/recommendations', (c) => c.json(app.stats.recommendations()));
+api.get('/analytics', (c) => c.json(app.stats.analytics({ days: c.req.query('days') ? Number(c.req.query('days')) : undefined, tag: c.req.query('tag') || undefined })));
+api.get('/presets', (c) => c.json(app.presets()));
+api.put('/presets', async (c) => c.json(app.savePresets(await c.req.json())));
 api.get('/grades/pending', (c) => c.json(app.study.pendingGrades(100)));
 api.post('/grades/:attemptId', async (c) => {
   const b = await c.req.json();
@@ -181,6 +188,8 @@ if (existsSync(DIST)) {
 }
 
 setInterval(() => { try { backupIfDue(app.db, app.dbPath); } catch {} }, 3600_000).unref();
+// Embed any questions that don't have a vector yet (first run, offline adds, edits).
+setTimeout(() => app.backfillEmbeddings(), 1500).unref();
 
 serve({ fetch: root.fetch, port: PORT, hostname: HOST }, () => {
   console.log(`Socrates  http://localhost:${PORT}`);

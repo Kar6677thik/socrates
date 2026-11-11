@@ -1,7 +1,8 @@
 import { useLocation, Link } from 'wouter';
-import { api, useApi, pct, fmtMs, tagLabel, useTagNames, type Home } from '../lib/api';
+import { api, useApi, pct, fmtMs, tagLabel, useTagNames, type Home, type Recommendation } from '../lib/api';
 import { useKeys } from '../lib/keys';
-import { Button, Card, Empty, toast } from '../components/ui';
+import { Button, Card, Empty, CopyBox, toast } from '../components/ui';
+import { Meter } from '../components/charts';
 
 export async function startSession(nav: (to: string) => void, config: Record<string, unknown>) {
   try {
@@ -35,7 +36,7 @@ function Calendar({ days }: { days: Home['calendar'] }) {
           title={c.n >= 0 ? `${c.day}: ${c.n} answers` : ''}
           className="w-[11px] h-[11px] rounded-[2.5px]"
           style={{
-            background: c.n < 0 ? 'transparent' : c.n === 0 ? 'var(--elev)' : `color-mix(in oklab, var(--accent) ${20 + Math.round((c.n / max) * 80)}%, var(--elev))`,
+            background: c.n < 0 ? 'transparent' : c.n === 0 ? 'var(--elev)' : `color-mix(in oklab, var(--chart-1) ${25 + Math.round((c.n / max) * 75)}%, var(--elev))`,
           }}
         />
       ))}
@@ -53,17 +54,57 @@ function Stat({ label, value, sub }: { label: string; value: string | number; su
   );
 }
 
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const KIND_LABEL: Record<Recommendation['kind'], string> = {
+  review: 'Due', weak: 'Weak area', overconfident: 'Misconception', fading: 'Fading', new: 'New topic', agent: 'For your agent',
+};
+
+function Recs({ recs }: { recs: Recommendation[] }) {
+  const [, nav] = useLocation();
+  // The review card is already the hero above.
+  const list = recs.filter((r) => r.kind !== 'review');
+  if (!list.length) return null;
+  return (
+    <div className="mt-8">
+      <h2 className="font-medium mb-3">Study next</h2>
+      <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
+        {list.map((r, i) =>
+          r.session ? (
+            <button key={i} onClick={() => startSession(nav, r.session!)} className="group text-left rounded-xl border border-line bg-panel px-5 py-4 hover:border-line-strong hover:bg-hover transition-colors">
+              <div className="text-[11.5px] text-faint">{KIND_LABEL[r.kind]}</div>
+              <div className="font-medium mt-0.5 flex items-center justify-between gap-2">
+                <span className="truncate">{r.title}</span>
+                <span className="text-faint group-hover:text-text transition-colors">→</span>
+              </div>
+              <div className="text-[12.5px] text-muted mt-1">{r.reason}</div>
+            </button>
+          ) : (
+            <div key={i} className="rounded-xl border border-dashed border-line px-5 py-4">
+              <div className="text-[11.5px] text-faint">{KIND_LABEL[r.kind]}</div>
+              <div className="font-medium mt-0.5">{r.title}</div>
+              <div className="text-[12.5px] text-muted mt-1 mb-3">{r.reason}</div>
+              {r.agent_prompt && <CopyBox text={r.agent_prompt} />}
+            </div>
+          ),
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function HomePage() {
   const [, nav] = useLocation();
   const { data: h } = useApi<Home>('/home');
+  const { data: recs = [] } = useApi<Recommendation[]>('/recommendations');
   const names = useTagNames();
   const reviewCount = h ? h.due + h.new_available : 0;
-  useKeys({ Enter: () => { if (reviewCount) startSession(nav, { mode: 'srs' }); else nav('/study'); } });
+  useKeys({ Enter: () => startSession(nav, { mode: reviewCount ? 'srs' : 'adaptive' }) });
 
   if (!h) return null;
   if (h.counts.active === 0 && h.counts.drafts === 0)
     return (
-      <div className="max-w-xl mx-auto pt-16">
+      <div className="max-w-xl mx-auto pt-16 fade-in">
         <h1 className="text-[22px] font-semibold tracking-[-0.01em]">Welcome to Socrates</h1>
         <p className="text-muted mt-2">Your question bank is empty. Add questions yourself, or connect Claude or ChatGPT and ask it to write some for you.</p>
         <div className="flex gap-2 mt-6">
@@ -87,18 +128,14 @@ export default function HomePage() {
           ) : (
             <>
               <div className="text-[28px] font-semibold tracking-[-0.02em] mt-1">All caught up</div>
-              <div className="text-muted">{h.unseen > 0 ? `New-question limit reached (${h.limits.new_per_day}/day).` : 'Nothing is due.'} Practice anything from Study.</div>
+              <div className="text-muted">{h.unseen > 0 ? `New-question limit reached (${h.limits.new_per_day}/day).` : 'Nothing is due.'} An adaptive session keeps you sharp.</div>
             </>
           )}
-          <div className="mt-auto pt-6 flex gap-2">
-            {reviewCount > 0 ? (
-              <Button variant="primary" size="lg" kbd="↵" onClick={() => startSession(nav, { mode: 'srs' })}>Start review</Button>
-            ) : (
-              <Button variant="primary" size="lg" kbd="↵" onClick={() => nav('/study')}>Practice</Button>
-            )}
-            {h.weak[0] && (
-              <Button size="lg" onClick={() => startSession(nav, { mode: 'practice', tags: [h.weak[0].path], limit: 15 })}>Drill weakest tag</Button>
-            )}
+          <div className="mt-auto pt-6 flex gap-2 flex-wrap">
+            <Button variant="primary" size="lg" kbd="↵" onClick={() => startSession(nav, { mode: reviewCount ? 'srs' : 'adaptive' })}>
+              {reviewCount > 0 ? 'Start review' : 'Adaptive session'}
+            </Button>
+            {h.weak.length > 0 && <Button size="lg" onClick={() => startSession(nav, { mode: 'weak', limit: 15 })}>Weak areas</Button>}
           </div>
         </Card>
         <Card className="p-6">
@@ -113,34 +150,34 @@ export default function HomePage() {
 
       {(h.counts.drafts > 0 || h.counts.pending > 0 || h.counts.flagged > 0) && (
         <div className="flex gap-2 mt-4 flex-wrap">
-          {h.counts.drafts > 0 && <Link href="/review"><Button size="sm">{h.counts.drafts} drafts to approve</Button></Link>}
-          {h.counts.pending > 0 && <Link href="/grades"><Button size="sm">{h.counts.pending} answers awaiting grade</Button></Link>}
-          {h.counts.flagged > 0 && <Link href="/library?flagged=1"><Button size="sm">{h.counts.flagged} flagged questions</Button></Link>}
+          {h.counts.drafts > 0 && <Link href="/review"><Button size="sm">{plural(h.counts.drafts, 'draft')} to approve</Button></Link>}
+          {h.counts.pending > 0 && <Link href="/grades"><Button size="sm">{plural(h.counts.pending, 'answer')} awaiting grade</Button></Link>}
+          {h.counts.flagged > 0 && <Link href="/library?flagged=1"><Button size="sm">{plural(h.counts.flagged, 'flagged question')}</Button></Link>}
         </div>
       )}
+
+      <Recs recs={recs} />
 
       <div className="mt-8">
         <div className="flex items-baseline justify-between mb-3">
           <h2 className="font-medium">Weakest tags</h2>
-          <span className="text-faint text-[12.5px]">last 60 days · min. 3 answers</span>
+          <Link href="/analytics" className="text-faint text-[12.5px] hover:text-text">All analytics →</Link>
         </div>
         {h.weak.length === 0 ? (
-          <Empty title="Not enough data yet">Answer a few questions and your weak spots will show up here.</Empty>
+          <Empty title="Not enough data yet">Answer a few questions per tag and your weak spots will show up here.</Empty>
         ) : (
           <Card>
             {h.weak.map((w, i) => (
               <button
                 key={w.id}
-                onClick={() => startSession(nav, { mode: 'practice', tags: [w.path], limit: 15 })}
+                onClick={() => startSession(nav, { mode: 'weak', tags: [w.path], limit: 15 })}
                 className={`w-full flex items-center gap-4 px-5 h-12 text-left hover:bg-hover transition-colors ${i ? 'border-t border-line' : ''}`}
               >
                 <span className="flex-1 truncate">{tagLabel(w.path, names)}</span>
-                {w.confident_wrong > 0 && <span className="text-[12px] text-warn">{w.confident_wrong} confidently wrong</span>}
-                <span className="text-[12px] text-faint w-20 text-right">{w.attempts} answers</span>
-                <span className="w-28 h-1.5 rounded-full bg-elev overflow-hidden">
-                  <span className="block h-full rounded-full bg-muted" style={{ width: `${Math.round(w.accuracy * 100)}%` }} />
-                </span>
-                <span className="w-10 text-right tabular-nums">{pct(w.accuracy)}</span>
+                {w.confident_wrong > 0 && <span className="text-[12px] text-warn max-sm:hidden">{w.confident_wrong} confidently wrong</span>}
+                <span className="text-[12px] text-faint w-20 text-right max-sm:hidden">{w.attempts} answers</span>
+                <Meter value={w.mastery} className="w-28 max-sm:w-16" />
+                <span className="w-10 text-right tabular-nums" title="Mastery: calibrated for question difficulty">{pct(w.mastery)}</span>
               </button>
             ))}
           </Card>

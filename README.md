@@ -36,7 +36,7 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 | Tags | `get_tag_tree`, `resolve_tags`, `create_tags`, `add_tag_alias`, `merge_tags`, `move_tag` |
 | Questions | `add_questions` (bulk, `dry_run`, `client_ref`), `check_duplicates`, `update_question`, `set_question_status`, `search_questions`, `get_questions` |
 | Grading | `list_pending_grades`, `submit_grades` |
-| Performance | `get_performance_summary`, `get_weak_areas`, `get_recent_mistakes`, `get_coverage_gaps` |
+| Performance | `get_performance_summary`, `get_weak_areas` (calibrated mastery), `get_recommendations`, `get_recent_mistakes`, `get_coverage_gaps` |
 | Sessions | `create_quiz` |
 | Prompts | `generate_targeted_questions`, `grade_pending` |
 
@@ -46,12 +46,22 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 - `add_questions` never creates tags. Unknown tags come back as `unresolved_tags` with the closest existing tags.
 - `create_tags` refuses anything that looks like an existing tag (typo, acronym, reordered words, plural variant, alias, same leaf under another parent) unless `force: true` with a `justification`.
 - Merges and renames leave the old name as an alias, so it keeps resolving.
-- Questions: exact duplicates and anything ≥ 0.92 similar are rejected; 0.85–0.92 is accepted and flagged as a near duplicate.
+- Questions: exact duplicates and anything ≥ 0.92 similar in wording are rejected; 0.85–0.92 is accepted and flagged as a near duplicate.
+- Questions that *mean* the same thing (local embeddings, ≥ 0.85) are flagged, never rejected, and only when the answers agree too. Embeddings rate a statement and its converse ("every square matrix is invertible" / "every invertible matrix is square") as close as a true paraphrase, so the answer check is what separates them. The model (all-MiniLM-L6-v2, ~23 MB) downloads into `data/models/` on first use; offline, checks fall back to wording only.
+
+## Engine
+
+- **Scheduling:** FSRS-6. The rating comes from correctness, speed against your usual time, confidence and hints.
+- **Calibration:** an Elo/IRT model updates your ability per tag (parents at half weight) and each question's difficulty after every graded answer. "Mastery" is the predicted chance of answering an average-difficulty question in that tag.
+- **Modes:** *Spaced review* (due + new), *Adaptive* (mix of due, weak and new, aiming at ~80% predicted success), *Weak areas* (lowest-mastery tags), *Practice* (weighted random). Save any setup as a preset.
+- **Leeches:** a question forgotten 6 times (configurable) is flagged and leaves the queue until rewritten.
+- **Undo:** `z` reverts the last answer, including schedule and calibration.
+- **Analytics:** accuracy over time, tag mastery with 14-day trend, forgetting curve and schedule calibration, speed vs accuracy, confidence calibration, difficulty, type, time of day, hesitation and answer changes.
 - Questions from an agent start as **drafts** you approve in the app (toggle in Settings). Every agent write is logged in *Agent activity* and most can be reverted.
 
 ## Keyboard
 
-Press `?` anywhere. The essentials: `Enter` on Home starts your review; in a session `1–9` pick, `Enter` checks/next, `q w e r` confidence, `h` hint, `x` flag, `s` skip, `e` edit, `Esc` end. `g` then a letter jumps between pages. `\` toggles light/dark.
+Press `?` anywhere. The essentials: `Enter` on Home starts your review; in a session `1–9` pick, `Enter` checks/next, `q w e r` confidence, `h` hint, `x` flag, `s` skip, `z` undo, `e` edit, `Esc` end. `g` then a letter jumps between pages. `\` toggles light/dark.
 
 ## Tests
 

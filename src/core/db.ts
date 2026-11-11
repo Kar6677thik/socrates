@@ -162,6 +162,14 @@ const MIGRATIONS: string[] = [
 
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `,
+  /* 2: adaptive engine, embeddings, undo */ `
+  ALTER TABLE questions ADD COLUMN irt_n INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE questions ADD COLUMN embedding BLOB;
+  ALTER TABLE attempts ADD COLUMN r_pred REAL;          -- FSRS recall probability when shown
+  ALTER TABLE attempts ADD COLUMN p_pred REAL;          -- engine's predicted P(correct)
+  ALTER TABLE attempts ADD COLUMN elapsed_days REAL;    -- days since previous review
+  ALTER TABLE attempts ADD COLUMN engine_before TEXT;   -- ability/difficulty before this attempt (undo)
+  `,
 ];
 
 export function openDb(path = DEFAULT_DB_PATH): DB {

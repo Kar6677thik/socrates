@@ -27,6 +27,7 @@ export const api = {
   get: <T,>(url: string) => req<T>('GET', url),
   post: <T,>(url: string, body: unknown = {}) => req<T>('POST', url, body),
   patch: <T,>(url: string, body: unknown) => req<T>('PATCH', url, body),
+  put: <T,>(url: string, body: unknown) => req<T>('PUT', url, body),
   del: <T,>(url: string) => req<T>('DELETE', url),
 };
 
@@ -103,7 +104,7 @@ export interface Home {
   streak: { current: number; best: number };
   counts: { active: number; drafts: number; flagged: number; pending: number; tags: number };
   calendar: { day: string; n: number; acc: number | null }[];
-  weak: { id: number; path: string; name: string; attempts: number; accuracy: number; confident_wrong: number }[];
+  weak: { id: number; path: string; name: string; attempts: number; mastery: number; recent_accuracy: number | null; trend: number | null; confident_wrong: number }[];
   limits: { new_per_day: number; reviews_per_day: number; retention: number };
 }
 
@@ -117,7 +118,20 @@ export interface SubmitResult {
   next_due: number | null;
   answer: any;
   explanation: string | null;
+  predicted?: number;
+  leech?: boolean;
 }
+
+export interface Recommendation {
+  kind: 'review' | 'weak' | 'overconfident' | 'fading' | 'new' | 'agent';
+  title: string;
+  reason: string;
+  session?: Record<string, unknown>;
+  agent_prompt?: string;
+}
+
+export type Mode = 'srs' | 'adaptive' | 'weak' | 'practice';
+export const MODE_LABELS: Record<Mode, string> = { srs: 'Spaced review', adaptive: 'Adaptive', weak: 'Weak areas', practice: 'Practice' };
 
 /** Tag paths are stored as slugs; show them as readable breadcrumbs. */
 export function tagLabel(path: string, names?: Map<string, string>) {
