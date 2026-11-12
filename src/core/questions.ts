@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { type DB, tx, now, getSetting } from './db.ts';
 import { Tags, type Suggestion } from './tags.ts';
 import { SPECS, QTYPES, type QType, checkSpec, answerKey, searchBody, publicSpec, clozeParts, clozePublicPrompt } from './qtypes.ts';
-import { contentHash, textVector, cosine, ftsQuery, normalizeText } from './text.ts';
+import { contentHash, textVector, cosine, ftsQuery, searchWords, normalizeText } from './text.ts';
 import { embed, embedText, toBlob, fromBlob, dot } from './embed.ts';
 
 export const DUPLICATE_THRESHOLD = 0.92;
@@ -175,15 +175,88 @@ export class Questions {
     };
   }
 
-  /** Similar existing questions (FTS prefilter, then cosine over word/char features). */
+  private probe: { clear: any; ins: any; stems: any; df: any } | null = null;
+  /** word -> FTS stem (stems never change, so this only grows; reset if it gets large). */
+  private stems = new Map<string, string>();
+  private probeUses = 0;
+  /**
+   * stem -> documents containing it. Lookups cost ~0.1 ms inside a write transaction, so
+   * counts are cached for a while; only the ranking of words depends on them. Zero is never
+   * cached, so a word added moments ago (e.g. earlier in the same import) still counts.
+   */
+  private dfCache = new Map<string, number>();
+  private dfAt = 0;
+  private docFreq(stem: string): number {
+    if (Date.now() - this.dfAt > 60_000 || this.dfCache.size > 100_000) { this.dfCache.clear(); this.dfAt = Date.now(); }
+    const hit = this.dfCache.get(stem);
+    if (hit !== undefined) return hit;
+    const n = ((this.probe!.df.get(stem) as { doc: number } | undefined)?.doc ?? 0);
+    if (n > 0) this.dfCache.set(stem, n);
+    return n;
+  }
+
+  /**
+   * FTS query for duplicate candidates: any two of the five rarest words that the library
+   * already contains. A plain OR of words matched most of a large library, and ranking every
+   * match made each duplicate check slower as the bank grew (25 ms per question at 10k).
+   * A real duplicate shares nearly all of its words, so it contains at least two of these.
+   * Stems come from FTS5 itself (a scratch table with the same tokenizer) so the document
+   * counts line up with the index.
+   */
+  private rareMatch(text: string, max = 5): string {
+    const words = searchWords(text).slice(0, 48);
+    if (!words.length) return '';
+    // FTS5 deletes leave tombstones behind, so the scratch table is rebuilt now and then.
+    if (this.probe && ++this.probeUses > 300) {
+      this.db.exec('DROP TABLE IF EXISTS temp.stem_probe_i; DROP TABLE IF EXISTS temp.stem_probe;');
+      this.probe = null;
+    }
+    if (!this.probe) {
+      this.probeUses = 0;
+      this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS temp.stem_probe USING fts5(w, tokenize='porter unicode61');
+        CREATE VIRTUAL TABLE IF NOT EXISTS temp.stem_probe_i USING fts5vocab(temp, stem_probe, instance);
+        CREATE VIRTUAL TABLE IF NOT EXISTS temp.questions_fts_v USING fts5vocab(main, questions_fts, row);`);
+      this.probe = {
+        clear: this.db.prepare('DELETE FROM temp.stem_probe'),
+        ins: this.db.prepare('INSERT INTO temp.stem_probe(rowid, w) VALUES(?, ?)'),
+        stems: this.db.prepare('SELECT term, doc FROM temp.stem_probe_i'),
+        df: this.db.prepare('SELECT doc FROM temp.questions_fts_v WHERE term = ?'),
+      };
+    }
+    const p = this.probe;
+    const unknown = words.filter((w) => !this.stems.has(w));
+    if (unknown.length) {
+      p.clear.run();
+      unknown.forEach((w, i) => p.ins.run(i + 1, w));
+      for (const r of p.stems.all() as { term: string; doc: number }[]) this.stems.set(unknown[r.doc - 1], r.term);
+      if (this.stems.size > 200_000) this.stems.clear();
+    }
+    const stemOf = new Map<string, string>(); // stem -> first word with it
+    for (const w of words) {
+      const s = this.stems.get(w);
+      if (s && !stemOf.has(s)) stemOf.set(s, w);
+    }
+    const ranked = [...stemOf]
+      .map(([stem, word]) => ({ word, df: this.docFreq(stem) }))
+      .filter((x) => x.df > 0)
+      .sort((a, b) => a.df - b.df || b.word.length - a.word.length)
+      .slice(0, max)
+      .map((x) => `"${x.word}"`);
+    if (ranked.length <= 2) return ranked.join(' OR ');
+    const pairs: string[] = [];
+    for (let i = 0; i < ranked.length; i++) for (let j = i + 1; j < ranked.length; j++) pairs.push(`(${ranked[i]} AND ${ranked[j]})`);
+    return pairs.join(' OR ');
+  }
+
+  /** Similar existing questions (FTS prefilter on rare words, then cosine over word/char features). */
   similar(type: QType, prompt: string, spec: any, opts: { excludeId?: number; limit?: number } = {}): SimilarHit[] {
     const text = `${prompt}\n${answerKey(type, spec)}`;
-    const match = ftsQuery(`${prompt} ${searchBody(type, spec)}`);
+    const match = this.rareMatch(`${prompt} ${searchBody(type, spec)}`);
     if (!match) return [];
     const cands = this.db
       .prepare(
         `SELECT q.id, q.type, q.prompt, q.spec FROM questions_fts f JOIN questions q ON q.id = f.rowid
-         WHERE questions_fts MATCH ? AND q.status != 'archived' ORDER BY bm25(questions_fts) LIMIT 60`,
+         WHERE questions_fts MATCH ? AND q.status != 'archived' ORDER BY bm25(questions_fts) LIMIT 25`,
       )
       .all(match) as { id: number; type: QType; prompt: string; spec: string }[];
     const v = textVector(text);
@@ -262,7 +335,7 @@ export class Questions {
     if (items.length > MAX_BATCH) throw new Error(`At most ${MAX_BATCH} questions per call (got ${items.length}). Split the batch.`);
     const actor = opts.actor ?? 'user';
     const status = opts.status ?? (actor.startsWith('agent') && getSetting(this.db, 'agent_drafts', true) ? 'draft' : 'active');
-    const batch: { type: QType; prompt: string; spec: any; hash: string; index: number; vec: Float32Array | null }[] = [];
+    const batch: { type: QType; prompt: string; spec: any; hash: string; index: number; vec: Float32Array | null; tv: ReturnType<typeof textVector> }[] = [];
     const results: AddResult[] = [];
 
     const run = () => {
@@ -297,7 +370,7 @@ export class Questions {
         for (const b of batch) {
           const ref = { id: -1 - b.index, prompt: `(item ${b.index} in this batch)` };
           if (b.hash === hash) { hits.unshift({ ...ref, similarity: 1, match: 'wording' }); continue; }
-          const s = cosine(v1, textVector(`${b.prompt}\n${answerKey(b.type, b.spec)}`));
+          const s = cosine(v1, b.tv);
           if (s >= NEAR_DUPLICATE_THRESHOLD) hits.push({ ...ref, similarity: +s.toFixed(3), match: 'wording' });
           else if (vec && b.vec) {
             const m = dot(vec, b.vec);
@@ -321,7 +394,7 @@ export class Questions {
             note: `Too similar (>= ${DUPLICATE_THRESHOLD}). Edit the existing question with update_question, or make this one test something different.`,
           });
         const near = hits.filter((h) => h.match === 'meaning' || h.similarity >= NEAR_DUPLICATE_THRESHOLD);
-        batch.push({ type: q.type, prompt: q.prompt, spec, hash, index, vec });
+        batch.push({ type: q.type, prompt: q.prompt, spec, hash, index, vec, tv: v1 });
 
         if (opts.dryRun) return results.push({ index, status: 'would_create', near_duplicates: near.length ? near : undefined, question_status: status });
 

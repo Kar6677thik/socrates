@@ -4,6 +4,7 @@ import { Tags } from './tags.ts';
 import { Questions } from './questions.ts';
 import { Study } from './study.ts';
 import { Stats } from './stats.ts';
+import { loadHistory, countReviews, currentWeights, validWeights, DEFAULT_WEIGHTS, MIN_REVIEWS } from './optimize.ts';
 
 export type Undo =
   | { kind: 'archive_questions'; ids: number[] }
@@ -88,6 +89,20 @@ export class App {
       retention: getSetting(this.db, 'retention', 0.9),
       agent_drafts: getSetting(this.db, 'agent_drafts', true),
       leech_threshold: getSetting(this.db, 'leech_threshold', 6),
+    };
+  }
+
+  /** Which FSRS weights are in use, and how much history there is to fit them on. */
+  scheduleInfo() {
+    const w = getSetting<number[] | null>(this.db, 'fsrs_weights', null);
+    const { hist } = loadHistory(this.db);
+    return {
+      custom: validWeights(w),
+      weights: currentWeights(this.db),
+      defaults: DEFAULT_WEIGHTS,
+      fitted_at: validWeights(w) ? getSetting<number | null>(this.db, 'fsrs_weights_at', null) : null,
+      reviews: countReviews(hist),
+      min_reviews: MIN_REVIEWS,
     };
   }
 

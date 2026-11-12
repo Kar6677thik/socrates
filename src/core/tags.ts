@@ -91,11 +91,12 @@ export class Tags {
   tree(opts: { withStats?: boolean } = {}) {
     const rows = this.db
       .prepare(
-        `SELECT t.id, t.name, t.path, t.description, t.parent_id,
-          (SELECT COUNT(*) FROM question_tags qt JOIN questions q ON q.id = qt.question_id
-             WHERE qt.tag_id = t.id AND q.status IN ('active','draft')) AS questions,
+        `WITH counts AS (
+           SELECT qt.tag_id, COUNT(*) n FROM questions q JOIN question_tags qt ON qt.question_id = q.id
+           WHERE q.status IN ('active','draft') GROUP BY qt.tag_id)
+         SELECT t.id, t.name, t.path, t.description, t.parent_id, COALESCE(c.n, 0) AS questions,
           (SELECT group_concat(alias_slug, ', ') FROM tag_aliases a WHERE a.tag_id = t.id) AS aliases
-         FROM tags t WHERE t.merged_into_id IS NULL ORDER BY t.path`,
+         FROM tags t LEFT JOIN counts c ON c.tag_id = t.id WHERE t.merged_into_id IS NULL ORDER BY t.path`,
       )
       .all() as {
       id: number; name: string; path: string; description: string | null; parent_id: number | null;

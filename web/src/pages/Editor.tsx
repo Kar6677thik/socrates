@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { api, useApi, invalidate, TYPES, TYPE_LABELS, ago, pct, fmtMs, fmtDue, tagLabel, useTagNames, type Question, type QType } from '../lib/api';
-import { Md } from '../lib/md';
+import { Md, firstAlt } from '../lib/md';
 import { useKeys } from '../lib/keys';
 import { Button, Field, Badge, Card, Segmented, toast, Kbd } from '../components/ui';
 import { TagInput } from '../components/TagInput';
 import { PromptField, ClozeHelp, MatchingForm, OrderingForm, CodeForm, HotspotForm } from '../components/EditorExtras';
 
 /** Cloze answers (first alternative of each {{cN::…}}), for previews. */
-const clozeAnswers = (prompt: string) => [...prompt.matchAll(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g)].map((m) => m[1].split('|')[0]);
+const clozeAnswers = (prompt: string) => [...prompt.matchAll(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g)].map((m) => firstAlt(m[1]));
 
 export interface Draft {
   type: QType;

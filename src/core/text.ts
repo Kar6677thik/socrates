@@ -177,9 +177,13 @@ export function cosine(a: Map<string, number>, b: Map<string, number>): number {
 }
 
 /** Build an FTS5 OR query from the most informative words of a text. */
+/** Distinct content words worth searching for (no stop words, no short tokens). */
+export function searchWords(s: string): string[] {
+  return [...new Set(normalizeText(s).split(' '))].filter((w) => w.length > 2 && !STOP.has(w) && /^[a-z0-9]+$/.test(w));
+}
+
 export function ftsQuery(s: string, max = 12): string {
-  const words = [...new Set(normalizeText(s).split(' '))]
-    .filter((w) => w.length > 2 && !STOP.has(w) && /^[a-z0-9]+$/.test(w))
+  const words = searchWords(s)
     .sort((a, b) => b.length - a.length)
     .slice(0, max);
   return words.map((w) => `"${w}"`).join(' OR ');

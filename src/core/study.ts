@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { type DB, tx, now } from './db.ts';
+import { type DB, tx, now, idSet } from './db.ts';
 import { Questions, type Question } from './questions.ts';
 import { QTYPES, type QType, autoGrade, RESPONSES, AUTO_GRADED, codeAutoGraded, clozeParts, type GradeResult } from './qtypes.ts';
 import { runJs, redact } from './coderun.ts';
-import { studyDay, endOfStudyDay, limits, review, deriveRating, baselineMs, cardRetrievability, loadCard, Rating } from './srs.ts';
+import { studyDay, endOfStudyDay, limits, review, deriveRating, baselineMs, cardRetrievability, fsrsDecay, loadCard, Rating } from './srs.ts';
 import { Engine, sigmoid, type EngineBefore } from './engine.ts';
 import { getSetting } from './db.ts';
 
@@ -72,7 +72,7 @@ export class Study {
    */
   private adaptiveQueue(pool: number[], c: SessionConfig, at: number): number[] {
     const W = c.mode === 'weak' ? { due: 0.4, weak: 1.6, target: 0.6, novelty: 0.2 } : { due: 1.0, weak: 0.6, target: 0.8, novelty: 0.5 };
-    const inPool = pool.join(',');
+    const inPool = idSet(this.db, 'pool_ids', pool);
     const cards = new Map(
       (this.db.prepare(`SELECT question_id, card, due FROM srs_cards WHERE question_id IN (${inPool})`).all() as { question_id: number; card: string; due: number }[]).map((r) => [r.question_id, r]),
     );
@@ -83,12 +83,13 @@ export class Study {
     for (const r of this.db.prepare(`SELECT question_id, tag_id FROM question_tags WHERE question_id IN (${inPool})`).all() as { question_id: number; tag_id: number }[])
       leafTags.set(r.question_id, [...(leafTags.get(r.question_id) ?? []), r.tag_id]);
     const horizon = endOfStudyDay(at);
+    const decayW = fsrsDecay(this.db);
     let newLeft = Math.max(0, limits(this.db).new_per_day - this.todayCounts(at).new_seen);
     const scored = pool
       .filter((id) => !recent.has(id))
       .map((id) => {
         const card = cards.get(id);
-        const r = card ? cardRetrievability(JSON.parse(card.card), at) : 0;
+        const r = card ? cardRetrievability(JSON.parse(card.card), at, decayW) : 0;
         const due = card ? (card.due <= horizon ? 1 + (1 - r) : (1 - r) * 0.5) : 0;
         const tagMastery = (leafTags.get(id) ?? []).map((t) => mastery.get(t)).filter((m) => m && m.n >= 3).map((m) => m!.mastery);
         const weak = tagMastery.length ? 1 - Math.min(...tagMastery) : 0.4;
@@ -111,7 +112,7 @@ export class Study {
   private examQueue(pool: number[], limit: number): number[] {
     const rows = this.db
       // Flashcards are self-rated, so they don't belong in an exam.
-      .prepare(`SELECT q.id, (SELECT MIN(tag_id) FROM question_tags WHERE question_id = q.id) tag FROM questions q WHERE q.id IN (${pool.join(',')}) AND q.type != 'flashcard'`)
+      .prepare(`SELECT q.id, (SELECT MIN(tag_id) FROM question_tags WHERE question_id = q.id) tag FROM questions q WHERE q.id IN (${idSet(this.db, 'pool_ids', pool)}) AND q.type != 'flashcard'`)
       .all() as { id: number; tag: number }[];
     const buckets = new Map<number, number[]>();
     for (const r of rows.sort(() => Math.random() - 0.5)) buckets.set(r.tag, [...(buckets.get(r.tag) ?? []), r.id]);
@@ -177,7 +178,7 @@ export class Study {
     if (!pool.length) return [];
     if (c.mode === 'adaptive' || c.mode === 'weak') return this.adaptiveQueue(pool, c, at);
     if (c.mode === 'exam') return this.examQueue(pool, c.limit ?? 30);
-    const inPool = pool.join(',');
+    const inPool = idSet(this.db, 'pool_ids', pool);
     if (c.mode === 'practice') {
       const stats = new Map(
         (this.db
@@ -196,10 +197,11 @@ export class Study {
     const lim = limits(this.db);
     const today = this.todayCounts(at);
     const horizon = endOfStudyDay(at);
+    const decayW = fsrsDecay(this.db);
     const due = (this.db
       .prepare(`SELECT question_id, card FROM srs_cards WHERE due <= ? AND question_id IN (${inPool})`)
       .all(horizon) as { question_id: number; card: string }[])
-      .map((r) => ({ id: r.question_id, r: cardRetrievability(JSON.parse(r.card), at) }))
+      .map((r) => ({ id: r.question_id, r: cardRetrievability(JSON.parse(r.card), at, decayW) }))
       .sort((a, b) => a.r - b.r)
       .slice(0, Math.max(0, lim.reviews_per_day - today.reviews))
       .map((r) => r.id);
@@ -335,7 +337,7 @@ export class Study {
 
       // What the models expected before this answer (for forgetting curves and calibration).
       const prev = loadCard(this.db, q.id);
-      const rPred = prev.isNew ? null : cardRetrievability(prev.card, a.shown_at);
+      const rPred = prev.isNew ? null : cardRetrievability(prev.card, a.shown_at, fsrsDecay(this.db));
       const elapsedDays = !prev.isNew && prev.card.last_review ? (a.shown_at - new Date(prev.card.last_review).getTime()) / 864e5 : null;
       let pPred = this.engine.predict(q.id);
       let engineBefore: EngineBefore | null = null;

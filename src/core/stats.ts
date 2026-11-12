@@ -1,5 +1,5 @@
 import { type DB, now } from './db.ts';
-import { studyDay, endOfStudyDay, limits, cardRetrievability } from './srs.ts';
+import { studyDay, endOfStudyDay, limits, cardRetrievability, fsrsDecay } from './srs.ts';
 import type { Tags } from './tags.ts';
 import { clozeParts } from './qtypes.ts';
 
@@ -202,7 +202,7 @@ export class Stats {
     const out: { kind: string; title: string; reason: string; session?: Record<string, unknown>; agent_prompt?: string }[] = [];
     const h = this.home();
     if (h.due + h.new_available > 0)
-      out.push({ kind: 'review', title: `Review ${h.due + h.new_available} questions`, reason: `${h.due} due today${h.new_available ? `, ${h.new_available} new` : ''}. Keeps your schedule on track.`, session: { mode: 'srs' } });
+      out.push({ kind: 'review', title: `Review ${h.due + h.new_available} question${h.due + h.new_available === 1 ? "" : "s"}`, reason: `${h.due} due today${h.new_available ? `, ${h.new_available} new` : ''}. Keeps your schedule on track.`, session: { mode: 'srs' } });
     const mastery = this.tagMastery({ minAttempts: 3 });
     const leaves = new Set((this.db.prepare(`SELECT path FROM tags t WHERE merged_into_id IS NULL AND NOT EXISTS (SELECT 1 FROM tags c WHERE c.parent_id = t.id AND c.merged_into_id IS NULL)`).all() as { path: string }[]).map((r) => r.path));
     const weakLeaves = mastery.filter((m) => leaves.has(m.path) && m.mastery < 0.7).slice(0, 2);
@@ -213,11 +213,12 @@ export class Stats {
       out.push({ kind: 'overconfident', title: `Recheck ${over.name}`, reason: `${over.confident_wrong} answers this month where you were sure but wrong. Likely a misconception.`, session: { mode: 'practice', tags: [over.path], limit: 10 } });
     // Decaying: reviewed tags whose average recall has dropped, before they come due.
     const at = now();
+    const decayW = fsrsDecay(this.db);
     const decay = (this.db
       .prepare(`SELECT t.path, t.name, c.card FROM srs_cards c JOIN question_tags qt ON qt.question_id = c.question_id JOIN tags t ON t.id = qt.tag_id WHERE c.due > ?`)
       .all(at) as { path: string; name: string; card: string }[]).reduce((m, r) => {
         const e = m.get(r.path) ?? { name: r.name, sum: 0, n: 0 };
-        e.sum += cardRetrievability(JSON.parse(r.card), at);
+        e.sum += cardRetrievability(JSON.parse(r.card), at, decayW);
         e.n++;
         return m.set(r.path, e);
       }, new Map<string, { name: string; sum: number; n: number }>());
@@ -226,15 +227,17 @@ export class Stats {
       out.push({ kind: 'fading', title: `Refresh ${fading[1].name}`, reason: `Estimated recall is down to ${Math.round((fading[1].sum / fading[1].n) * 100)}%. A short session now saves relearning later.`, session: { mode: 'adaptive', tags: [fading[0]], limit: 10 } });
     const untouched = this.db
       .prepare(
-        `SELECT t.path, t.name, COUNT(*) n FROM tags t JOIN question_tags qt ON qt.tag_id = t.id JOIN questions q ON q.id = qt.question_id
-         WHERE q.status = 'active' AND t.merged_into_id IS NULL AND NOT EXISTS (SELECT 1 FROM attempts a JOIN question_tags q2 ON q2.question_id = a.question_id WHERE q2.tag_id = t.id)
+        // tags with any attempt, computed once (a correlated NOT EXISTS here took seconds on 25k questions)
+        `WITH seen AS (SELECT DISTINCT qt.tag_id FROM attempts a JOIN question_tags qt ON qt.question_id = a.question_id)
+         SELECT t.path, t.name, COUNT(*) n FROM tags t JOIN question_tags qt ON qt.tag_id = t.id JOIN questions q ON q.id = qt.question_id
+         WHERE q.status = 'active' AND t.merged_into_id IS NULL AND t.id NOT IN (SELECT tag_id FROM seen)
          GROUP BY t.id ORDER BY n DESC LIMIT 1`,
       )
       .get() as { path: string; name: string; n: number } | undefined;
-    if (untouched) out.push({ kind: 'new', title: `Start ${untouched.name}`, reason: `${untouched.n} questions you have never seen.`, session: { mode: 'practice', tags: [untouched.path], limit: 10 } });
+    if (untouched) out.push({ kind: 'new', title: `Start ${untouched.name}`, reason: untouched.n === 1 ? "1 question you have never seen." : `${untouched.n} questions you have never seen.`, session: { mode: 'practice', tags: [untouched.path], limit: 10 } });
     const thin = weakLeaves.map((w) => ({ w, n: (this.db.prepare(`SELECT COUNT(*) n FROM question_tags qt JOIN questions q ON q.id = qt.question_id WHERE qt.tag_id = ? AND q.status = 'active'`).get(w.id) as { n: number }).n })).find((x) => x.n < 8);
     if (thin)
-      out.push({ kind: 'agent', title: `More questions on ${thin.w.name}`, reason: `Only ${thin.n} questions for a weak tag. Ask your agent to write targeted ones.`, agent_prompt: `Look at my recent mistakes in Socrates under "${thin.w.path}" and add 8 new questions that target them, mixing types and difficulties.` });
+      out.push({ kind: 'agent', title: `More questions on ${thin.w.name}`, reason: `Only ${thin.n} question${thin.n === 1 ? "" : "s"} for a weak tag. Ask your agent to write targeted ones.`, agent_prompt: `Look at my recent mistakes in Socrates under "${thin.w.path}" and add 8 new questions that target them, mixing types and difficulties.` });
     return out.slice(0, limit);
   }
 

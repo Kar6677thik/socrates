@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { api, useApi, invalidate } from '../lib/api';
-import { Button, Card, Field, PageHeader, CopyBox, Segmented, toast } from '../components/ui';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Link } from 'wouter';
+import { api, useApi, invalidate, ago } from '../lib/api';
+import { Button, Card, Field, PageHeader, CopyBox, Segmented, Badge, toast } from '../components/ui';
 
 interface S { new_per_day: number; reviews_per_day: number; retention: number; agent_drafts: boolean }
 interface Mcp { token: string; http_url: string; path_token_url: string; stdio_command: { command: string; args: string[] }; claude_code: string }
@@ -92,8 +93,163 @@ export default function Settings() {
         </>
       )}
 
-      <h2 className="font-medium mt-10 mb-2">Data</h2>
-      <p className="text-muted text-[13px]">Everything lives in <code className="font-mono">data/socrates.db</code>. A backup is written to <code className="font-mono">data/backups/</code> every day (14 kept) and before each database upgrade.</p>
+      <Schedule />
+
+      <Data />
+    </div>
+  );
+}
+
+interface ScheduleInfo { custom: boolean; weights: number[]; defaults: number[]; fitted_at: number | null; reviews: number; min_reviews: number }
+interface Metric { log_loss: number; rmse: number }
+interface Fit {
+  reviews: number; cards: number; enough: boolean; fitted: number[] | null; better: boolean;
+  holdout: { current: Metric; fitted: Metric; n: number } | null;
+  all: { current: Metric; fitted: Metric } | null;
+}
+
+/** Fit the FSRS weights to your own review history, compare, and apply or reset. */
+function Schedule() {
+  const { data: info, refetch } = useApi<ScheduleInfo>('/schedule');
+  const [fit, setFit] = useState<Fit | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    try { setFit(await api.post<Fit>('/schedule/optimize', {})); }
+    catch (e: any) { toast(e.message, 'bad'); }
+    finally { setBusy(false); }
+  };
+  const apply = async (weights: number[] | null) => {
+    try {
+      const r = await api.post<{ updated: number }>('/schedule/weights', { weights });
+      toast(weights ? `Applied. ${r.updated} cards rescheduled.` : 'Back to the default weights', 'good');
+      setFit(null);
+      invalidate('/home', '/analytics');
+      refetch();
+    } catch (e: any) { toast(e.message, 'bad'); }
+  };
+  if (!info) return null;
+  const enough = info.reviews >= info.min_reviews;
+  const m = fit?.holdout ?? fit?.all;
+
+  return (
+    <>
+      <h2 className="font-medium mt-10 mb-1">Schedule</h2>
+      <p className="text-muted text-[13px] mb-4">FSRS predicts when you will forget each question. Its default weights come from millions of other learners; fitting them to your own reviews makes the predictions, and so the intervals, match how you remember.</p>
+      <Card className="p-5 space-y-4 text-[13px]">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">{info.custom ? 'Fitted to your history' : 'Default weights'}</span>
+              {info.custom && info.fitted_at && <Badge tone="accent">{ago(info.fitted_at)}</Badge>}
+            </div>
+            <div className="text-muted">
+              {info.reviews.toLocaleString()} reviews with a gap of a day or more.{' '}
+              {enough ? (info.reviews < 1000 ? 'Enough to fit; 1,000 or more gives steadier weights.' : '') : `Fitting needs ${info.min_reviews}.`}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {info.custom && <Button variant="ghost" onClick={() => apply(null)}>Reset to defaults</Button>}
+            <Button onClick={run} disabled={!enough || busy}>{busy ? 'Fitting…' : 'Fit to my history'}</Button>
+          </div>
+        </div>
+
+        {fit && m && fit.fitted && (
+          <div className="border-t border-line pt-4 space-y-3">
+            <table className="w-full text-[13px] tabular-nums">
+              <thead>
+                <tr className="text-faint text-[12px] text-left">
+                  <th className="font-normal pb-1.5">{fit.holdout ? `On ${fit.holdout.n} reviews of cards left out of the fit` : 'On all reviews'}</th>
+                  <th className="font-normal pb-1.5 text-right w-24">Current</th>
+                  <th className="font-normal pb-1.5 text-right w-24">Fitted</th>
+                </tr>
+              </thead>
+              <tbody>
+                <MetricRow label="Prediction error (log loss)" a={m.current.log_loss} b={m.fitted.log_loss} fmt={(x) => x.toFixed(3)} />
+                <MetricRow label="Calibration error" a={m.current.rmse} b={m.fitted.rmse} fmt={(x) => (x * 100).toFixed(1) + '%'} />
+              </tbody>
+            </table>
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <p className="text-muted">{fit.better ? 'The fitted weights predict your recall better. Applying them recomputes every card from its history and moves due dates to match.' : 'The fitted weights are not clearly better, so keeping the current ones is safer.'}</p>
+              <div className="flex gap-2">
+                <Button variant="ghost" onClick={() => setFit(null)}>Discard</Button>
+                <Button variant={fit.better ? 'primary' : 'secondary'} onClick={() => apply(fit.fitted)}>Apply</Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+    </>
+  );
+}
+
+function MetricRow({ label, a, b, fmt }: { label: string; a: number; b: number; fmt: (x: number) => string }) {
+  const better = b < a - 1e-4, worse = b > a + 1e-4;
+  return (
+    <tr className="border-t border-line">
+      <td className="py-1.5 text-muted">{label}</td>
+      <td className="py-1.5 text-right">{fmt(a)}</td>
+      <td className={`py-1.5 text-right font-medium ${better ? 'text-good' : worse ? 'text-bad' : ''}`}>{fmt(b)}</td>
+    </tr>
+  );
+}
+
+interface Backups { dir: string; items: { name: string; bytes: number; at: number }[] }
+const mb = (b: number) => (b < 1e6 ? `${Math.max(1, Math.round(b / 1e3))} KB` : `${(b / 1e6).toFixed(1)} MB`);
+
+function Data() {
+  const { data: backups, refetch } = useApi<Backups>('/backups');
+  const backupNow = async () => {
+    try { await api.post('/backups', {}); refetch(); toast('Backup written', 'good'); }
+    catch (e: any) { toast(e.message, 'bad'); }
+  };
+  return (
+    <>
+      <h2 className="font-medium mt-10 mb-1">Data</h2>
+      <p className="text-muted text-[13px] mb-4">Everything lives in <code className="font-mono">data/socrates.db</code>. A backup is written every day (14 kept) and before each database upgrade.</p>
+      <Card className="divide-y divide-line text-[13px]">
+        <Row title="Import questions" sub="Anki decks, CSV, Markdown, or a Socrates export.">
+          <Link href="/import"><Button>Import…</Button></Link>
+        </Row>
+        <Row title="Export questions" sub="Tags, questions and their images as one JSON file. Import it here or on another machine. History is not included.">
+          <a href="/api/export/json" download><Button>Export JSON</Button></a>
+        </Row>
+        <Row title="Download a full copy" sub="The whole database, history and schedule included. Open it with any SQLite tool, or replace data/socrates.db with it to restore (while Socrates is stopped).">
+          <a href="/api/export/db" download><Button>Download .db</Button></a>
+        </Row>
+        <div className="px-5 py-4">
+          <div className="flex items-center justify-between gap-4 mb-2">
+            <div>
+              <div className="font-medium">Backups</div>
+              {backups && <div className="text-faint text-[12px] font-mono break-all">{backups.dir}</div>}
+            </div>
+            <Button variant="ghost" onClick={backupNow}>Back up now</Button>
+          </div>
+          {backups?.items.length ? (
+            <div className="max-h-48 overflow-y-auto">
+              {backups.items.map((b) => (
+                <div key={b.name} className="flex justify-between py-1 text-[12.5px] border-t border-line first:border-0">
+                  <span className="font-mono text-muted">{b.name}</span>
+                  <span className="text-faint tabular-nums">{mb(b.bytes)} · {ago(b.at)}</span>
+                </div>
+              ))}
+            </div>
+          ) : <div className="text-faint text-[12.5px]">No backups yet.</div>}
+        </div>
+      </Card>
+    </>
+  );
+}
+
+function Row({ title, sub, children }: { title: string; sub: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-6 px-5 py-4 max-sm:flex-col max-sm:items-start max-sm:gap-3">
+      <div>
+        <div className="font-medium">{title}</div>
+        <div className="text-muted mt-0.5">{sub}</div>
+      </div>
+      <div className="shrink-0">{children}</div>
     </div>
   );
 }

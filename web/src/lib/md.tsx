@@ -91,7 +91,7 @@ export function plain(src: string, max = 180): string {
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/[*_`#>]/g, '')
     .replace(/\{\{\s*blank\s*\}\}/g, '___')
-    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, x: string) => `[${x.split('|')[0]}]`)
+    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, x: string) => `[${firstAlt(x)}]`)
     .replace(/\s+/g, ' ')
     .trim();
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
@@ -104,7 +104,7 @@ export const MdLine = memo(function MdLine({ src, className = '' }: { src: strin
     .replace(/\$\$([\s\S]*?)\$\$/g, (_m, x: string) => `$${x.trim()}$`)
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' [image] ')
     .replace(/\{\{\s*blank\s*\}\}/g, '___')
-    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, x: string) => `[${x.split('|')[0]}]`)
+    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, x: string) => `[${firstAlt(x)}]`)
     .replace(/^#+\s*/gm, '')
     .replace(/\s*\n+\s*/g, ' ')
     .trim();
@@ -114,3 +114,16 @@ export const MdLine = memo(function MdLine({ src, className = '' }: { src: strin
 export const Md = memo(function Md({ src, className = '', inline = false }: { src: string; className?: string; inline?: boolean }) {
   return <div className={`md ${inline ? 'md-inline' : ''} ${className}`} dangerouslySetInnerHTML={{ __html: renderMd(src) }} />;
 });
+
+/** First cloze alternative. `|` separates alternatives, except inside $...$ math or as `\|`. */
+export function firstAlt(s: string): string {
+  let cur = '', math = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\' && s[i + 1] === '|' && !math) { cur += '|'; i++; continue; }
+    if (ch === '$') math = !math;
+    if (ch === '|' && !math) break;
+    cur += ch;
+  }
+  return cur;
+}

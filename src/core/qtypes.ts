@@ -94,7 +94,22 @@ export const codeAutoGraded = (spec: any) => /^(js|javascript)$/i.test(spec.lang
 // ---- Cloze: {{c1::answer}} or {{c1::answer|alternative::hint}}
 export const CLOZE_RE = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
 export function clozeParts(prompt: string) {
-  return [...prompt.matchAll(CLOZE_RE)].map((m) => ({ n: Number(m[1]), accept: m[2].split('|').map((s) => s.trim()).filter(Boolean), hint: m[3]?.trim() }));
+  return [...prompt.matchAll(CLOZE_RE)].map((m) => ({ n: Number(m[1]), accept: splitAlternatives(m[2]).map((s) => s.trim()).filter(Boolean), hint: m[3]?.trim() }));
+}
+
+/** Split cloze alternatives on `|`, except inside $...$ math (|x|) or when escaped as `\|`. */
+export function splitAlternatives(s: string): string[] {
+  const out: string[] = [];
+  let cur = '', math = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\' && s[i + 1] === '|' && !math) { cur += '|'; i++; continue; }
+    if (ch === '$') math = !math;
+    if (ch === '|' && !math) { out.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
 }
 /** Prompt with cloze answers replaced by blanks (hints kept in brackets). */
 export function clozePublicPrompt(prompt: string) {

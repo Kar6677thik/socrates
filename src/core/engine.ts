@@ -1,4 +1,4 @@
-import { type DB, now } from './db.ts';
+import { type DB, now, idSet } from './db.ts';
 
 /**
  * Elo/IRT-style calibration (1-parameter logistic):
@@ -78,22 +78,31 @@ export class Engine {
   predictMany(ids: number[]): Map<number, number> {
     const out = new Map<number, number>();
     if (!ids.length) return out;
-    const qs = this.db.prepare(`SELECT id, difficulty, irt_b FROM questions WHERE id IN (${ids.join(',')})`).all() as { id: number; difficulty: number; irt_b: number | null }[];
-    const qt = this.db.prepare(`SELECT qt.question_id, t.id, t.path FROM question_tags qt JOIN tags t ON t.id = qt.tag_id WHERE qt.question_id IN (${ids.join(',')})`).all() as { question_id: number; id: number; path: string }[];
+    const src = ids.length > 200 ? idSet(this.db, 'engine_ids', ids) : ids.join(',');
+    const qs = this.db.prepare(`SELECT id, difficulty, irt_b FROM questions WHERE id IN (${src})`).all() as { id: number; difficulty: number; irt_b: number | null }[];
+    const qt = this.db.prepare(`SELECT question_id, tag_id FROM question_tags WHERE question_id IN (${src})`).all() as { question_id: number; tag_id: number }[];
     const ab = new Map((this.db.prepare('SELECT tag_id, theta, n FROM ability').all() as { tag_id: number; theta: number; n: number }[]).map((r) => [r.tag_id, r]));
-    const pathId = new Map((this.db.prepare('SELECT id, path FROM tags WHERE merged_into_id IS NULL').all() as { id: number; path: string }[]).map((r) => [r.path, r.id]));
-    const byQ = new Map<number, TagW[]>();
-    for (const r of qt) {
-      const list = byQ.get(r.question_id) ?? [];
-      if (!list.some((x) => x.id === r.id)) list.push({ id: r.id, w: 1 });
-      const parts = r.path.split('/');
+    // Each tag's weights (itself 1, ancestors 0.5), worked out once per tag rather than per question.
+    const tags = this.db.prepare('SELECT id, path FROM tags WHERE merged_into_id IS NULL').all() as { id: number; path: string }[];
+    const pathId = new Map(tags.map((r) => [r.path, r.id]));
+    const own = new Map<number, TagW[]>();
+    for (const t of tags) {
+      const parts = t.path.split('/');
+      const list: TagW[] = [{ id: t.id, w: 1 }];
       for (let i = parts.length - 1; i > 0; i--) {
         const a = pathId.get(parts.slice(0, i).join('/'));
-        if (a && !list.some((x) => x.id === a)) list.push({ id: a, w: 0.5 });
+        if (a) list.push({ id: a, w: 0.5 });
       }
-      byQ.set(r.question_id, list);
+      own.set(t.id, list);
     }
-    for (const q of qs) out.set(q.id, sigmoid(this.theta(byQ.get(q.id) ?? [], ab) - (q.irt_b ?? prior(q.difficulty))));
+    const byQ = new Map<number, Map<number, number>>();
+    for (const r of qt) {
+      let m = byQ.get(r.question_id);
+      if (!m) byQ.set(r.question_id, (m = new Map()));
+      for (const tw of own.get(r.tag_id) ?? []) if ((m.get(tw.id) ?? 0) < tw.w) m.set(tw.id, tw.w);
+    }
+    const tagsOf = (id: number): TagW[] => [...(byQ.get(id) ?? [])].map(([tid, w]) => ({ id: tid, w }));
+    for (const q of qs) out.set(q.id, sigmoid(this.theta(tagsOf(q.id), ab) - (q.irt_b ?? prior(q.difficulty))));
     return out;
   }
 

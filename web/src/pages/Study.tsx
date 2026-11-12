@@ -29,7 +29,10 @@ function Builder() {
   const [, nav] = useLocation();
   const { data: h } = useApi<Home>('/home');
   const { data: presets = [], refetch } = useApi<Preset[]>('/presets');
-  const [mode, setMode] = useState<Mode>('srs');
+  const [mode, setMode] = useState<Mode>(() => {
+    const m = new URLSearchParams(location.search).get('mode');
+    return m && m in MODE_LABELS ? (m as Mode) : 'srs';
+  });
   const [tags, setTags] = useState<string[]>([]);
   const [types, setTypes] = useState<QType[]>([]);
   const [diff, setDiff] = useState<number[]>([]);

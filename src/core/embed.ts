@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { DATA_DIR } from './db.ts';
+import { splitAlternatives } from './qtypes.ts';
 
 /**
  * Local sentence embeddings (all-MiniLM-L6-v2, 8-bit, ~23 MB) for meaning-based duplicate checks.
@@ -36,7 +37,7 @@ function load(): Promise<Extractor | null> {
 /** Text that represents a question's meaning: the prompt without markup noise. */
 export function embedText(prompt: string): string {
   return prompt
-    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, a: string) => a.split('|')[0])
+    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, a: string) => splitAlternatives(a)[0])
     .replace(/\{\{\s*blank\s*\}\}/g, '___')
     .replace(/```[\w-]*\n?/g, '')
     .replace(/[*_#>`]/g, '')

@@ -21,6 +21,8 @@ export interface Limits {
   new_per_day: number;
   reviews_per_day: number;
   retention: number;
+  /** FSRS weights fitted to your history, or null for the defaults. */
+  weights: number[] | null;
 }
 
 export function limits(db: DB): Limits {
@@ -28,15 +30,28 @@ export function limits(db: DB): Limits {
     new_per_day: getSetting(db, 'new_per_day', 20),
     reviews_per_day: getSetting(db, 'reviews_per_day', 200),
     retention: getSetting(db, 'retention', 0.9),
+    weights: fittedWeights(db),
   };
 }
 
-const schedulers = new Map<number, ReturnType<typeof fsrs>>();
-export function scheduler(retention = 0.9) {
-  let s = schedulers.get(retention);
+function fittedWeights(db: DB): number[] | null {
+  const w = getSetting<number[] | null>(db, 'fsrs_weights', null);
+  return Array.isArray(w) && w.length === 21 && w.every((x) => typeof x === 'number' && Number.isFinite(x)) ? w : null;
+}
+
+/** Forgetting-curve decay in use (the fitted w20, or the FSRS-6 default). */
+export function fsrsDecay(db: DB): number {
+  return fittedWeights(db)?.[20] ?? FSRS6_DEFAULT_DECAY;
+}
+
+const schedulers = new Map<string, ReturnType<typeof fsrs>>();
+export function scheduler(retention = 0.9, weights: number[] | null = null) {
+  const key = retention + '|' + (weights?.join(',') ?? '');
+  let s = schedulers.get(key);
   if (!s) {
-    s = fsrs(generatorParameters({ request_retention: retention, enable_fuzz: true, enable_short_term: true }));
-    schedulers.set(retention, s);
+    s = fsrs(generatorParameters({ request_retention: retention, enable_fuzz: true, enable_short_term: true, ...(weights ? { w: weights } : {}) }));
+    if (schedulers.size > 20) schedulers.clear();
+    schedulers.set(key, s);
   }
   return s;
 }
@@ -48,10 +63,10 @@ export function retrievability(stability: number, elapsedDays: number, decay = F
   return Math.pow(1 + (factor * Math.max(0, elapsedDays)) / stability, -decay);
 }
 
-export function cardRetrievability(card: { stability: number; last_review?: Date | string | null }, at: number): number {
+export function cardRetrievability(card: { stability: number; last_review?: Date | string | null }, at: number, decay = FSRS6_DEFAULT_DECAY): number {
   if (!card.last_review) return 0;
   const elapsed = (at - new Date(card.last_review).getTime()) / 864e5;
-  return retrievability(card.stability, elapsed);
+  return retrievability(card.stability, elapsed, decay);
 }
 
 /** Typical answer time for a type, used when a question has no history yet. */
@@ -93,7 +108,8 @@ export function loadCard(db: DB, questionId: number): { card: Card; isNew: boole
 /** Apply a review. Returns the card JSON before the review (null if it was new) and the new due time. */
 export function review(db: DB, questionId: number, rating: Grade, at: number) {
   const { card, raw } = loadCard(db, questionId);
-  const next = scheduler(limits(db).retention).next(card, new Date(at), rating).card;
+  const l = limits(db);
+  const next = scheduler(l.retention, l.weights).next(card, new Date(at), rating).card;
   const json = JSON.stringify(next);
   db.prepare(
     `INSERT INTO srs_cards(question_id, card, due, state, reps, lapses, last_review) VALUES(?,?,?,?,?,?,?)

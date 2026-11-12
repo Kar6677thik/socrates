@@ -252,3 +252,14 @@ export function setSetting(db: DB, key: string, value: unknown) {
 }
 
 export const now = () => Date.now();
+
+/**
+ * Put a list of ids in a temp table and return a subquery over it, for `IN (...)`.
+ * Inlined lists of thousands of ids are slow to parse and plan on every query.
+ */
+export function idSet(db: DB, name: string, ids: number[]): string {
+  if (!/^[a-z_]+$/.test(name)) throw new Error('bad temp table name');
+  db.exec(`CREATE TEMP TABLE IF NOT EXISTS ${name}(id INTEGER PRIMARY KEY); DELETE FROM temp.${name};`);
+  db.prepare(`INSERT OR IGNORE INTO temp.${name}(id) SELECT value FROM json_each(?)`).run(JSON.stringify(ids));
+  return `SELECT id FROM temp.${name}`;
+}

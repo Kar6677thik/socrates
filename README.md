@@ -18,7 +18,20 @@ Development (hot reload UI on :5173, API on :4321):
 npm run dev
 ```
 
-Data lives in `data/socrates.db` (SQLite). Daily backups go to `data/backups/` (14 kept), plus one before every schema upgrade.
+Data lives in `data/socrates.db` (SQLite). Daily backups go to `data/backups/` (14 kept), plus one before every schema upgrade. Settings → *Data* can back up on demand, export your questions as JSON, or download a full copy of the database. To restore, stop Socrates and replace `data/socrates.db` with a backup.
+
+The UI is installable as an app (Chrome/Edge: the install icon in the address bar) and keeps working from cache if the server is briefly down.
+
+## Import
+
+Library → *Import*, or drop a file on the Import page. You see every question and tag before anything is added.
+
+- **Anki** (`.apkg`, `.colpkg`, old and new export formats): basic and cloze notes, images, formatting and MathJax. Deck names and Anki tags become tags (`A::B` → `A > B`). Re-importing a deck only adds new notes. Audio, image occlusion and review history are not imported.
+- **CSV / TSV**: two columns (question, answer) work. A header row can add `tags`, `explanation`, `type` (`flashcard`, `mcq`, `tf`, `numeric`, `written`) and `options` (separated by `|`).
+- **Markdown**: questions separated by `---`; `Q:` / `A:` / `E:` (explanation) / `Tags:` lines, or a heading with the answer under it; `- [x]` / `- [ ]` for multiple choice; `{{c1::…}}` for cloze. A block with only `Tags:` sets the tags for the blocks after it.
+- **Socrates JSON** (from *Export*): tags with aliases and descriptions, every question type, and images.
+
+Imported tags go through the same rules as an agent's: a tag that looks like one you have (`Calculas`, `Capitols`) maps onto the existing one unless you choose *Create new*. Duplicate questions are skipped.
 
 ## Connect an AI agent
 
@@ -60,6 +73,7 @@ Multiple choice (single and multiple answer), true/false, fill in the blank, clo
 ## Engine
 
 - **Scheduling:** FSRS-6. The rating comes from correctness, speed against your usual time, confidence and hints.
+- **Schedule fitting:** Settings → *Schedule* fits the FSRS weights to your own reviews (needs 100 reviews spaced a day or more apart; 1,000+ is steadier). It shows prediction error on cards left out of the fit before you apply anything, and applying recomputes every card from its history. *Reset to defaults* undoes it.
 - **Calibration:** an Elo/IRT model updates your ability per tag (parents at half weight) and each question's difficulty after every graded answer. "Mastery" is the predicted chance of answering an average-difficulty question in that tag.
 - **Modes:** *Spaced review* (due + new), *Adaptive* (mix of due, weak and new, aiming at ~80% predicted success), *Weak areas* (lowest-mastery tags), *Practice* (weighted random), *Exam* (random sample spread across tags, no feedback until you submit, mark questions for review, then a full review screen; blank answers score zero). Any mode can have a time limit. Save any setup as a preset.
 - **Leeches:** a question forgotten 6 times (configurable) is flagged and leaves the queue until rewritten.
@@ -69,12 +83,12 @@ Multiple choice (single and multiple answer), true/false, fill in the blank, clo
 
 ## Keyboard
 
-Press `?` anywhere. The essentials: `Enter` on Home starts your review; in a session `1–9` pick, `Enter` checks/next, `q w e r` confidence, `h` hint, `x` flag, `s` skip, `z` undo, `o` open in library, `Esc` end. Matching: digits assign, ↑/↓ change row. Ordering: ↑/↓ pick, Alt+↑/↓ move. Code: Ctrl+' runs tests, Ctrl+Enter submits. Exam: ←/→ move between questions, `m` marks, Ctrl+Enter submits. `g` then a letter jumps between pages. `\` toggles light/dark.
+Press `?` anywhere. `Ctrl+K` opens the command palette: pages, actions, study sessions, practice by tag, and question search. The essentials: `Enter` on Home starts your review; in a session `1–9` pick, `Enter` checks/next, `q w e r` confidence, `h` hint, `x` flag, `s` skip, `z` undo, `o` open in library, `Esc` end. Matching: digits assign, ↑/↓ change row. Ordering: ↑/↓ pick, Alt+↑/↓ move. Code: Ctrl+' runs tests, Ctrl+Enter submits. Exam: ←/→ move between questions, `m` marks, Ctrl+Enter submits. `g` then a letter jumps between pages. `\` toggles light/dark.
 
 ## Tests
 
 ```bash
-npm test           # core + MCP integration tests (node:test)
+npm test           # core, MCP, engine, question types, schedule fitting and import tests (node:test)
 npm run typecheck
 ```
 

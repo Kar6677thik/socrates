@@ -63,7 +63,7 @@ export default function Library() {
       <PageHeader
         title="Library"
         sub={data ? `${data.total} question${data.total === 1 ? '' : 's'}` : ' '}
-        actions={<Link href="/library/new"><Button variant="primary" kbd="n">New question</Button></Link>}
+        actions={<><Link href="/import"><Button variant="ghost">Import</Button></Link><Link href="/library/new"><Button variant="primary" kbd="n">New question</Button></Link></>}
       />
       <div className="space-y-3 mb-5">
         <div className="relative">

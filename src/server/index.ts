@@ -7,12 +7,16 @@ import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { App } from '../core/app.ts';
-import { backupIfDue } from '../core/db.ts';
+import { backupIfDue, backup } from '../core/db.ts';
 import { buildMcpServer } from '../mcp/server.ts';
 import { TagError } from '../core/tags.ts';
 import { QTYPES, TYPE_LABELS, codeAutoGraded } from '../core/qtypes.ts';
 import { runJs, redact } from '../core/coderun.ts';
 import { saveImage, fetchImage, decodeBase64, mimeFor, mediaDir } from '../core/media.ts';
+import { optimize, applyWeights } from '../core/optimize.ts';
+import { upload, preview as importPreview, commit as importCommit, exportJson, FORMATS, type ImportFormat } from '../core/importer.ts';
+import { mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST = join(ROOT, 'web', 'dist');
@@ -28,7 +32,10 @@ const LOCAL_HOSTS = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 // non-JSON writes (forces a CORS preflight, which we never grant, for cross-site requests).
 api.use('*', async (c, next) => {
   if (!LOCAL_HOSTS.test(c.req.header('host') ?? '')) return c.json({ error: 'The app API is only available on localhost.' }, 403);
-  if (c.req.method !== 'GET' && !(c.req.header('content-type') ?? '').includes('application/json'))
+  const ct = c.req.header('content-type') ?? '';
+  // File uploads send raw bytes; octet-stream also forces a preflight, so the CSRF guard holds.
+  const binaryOk = c.req.path.endsWith('/import/upload') && ct.startsWith('application/octet-stream');
+  if (c.req.method !== 'GET' && !ct.includes('application/json') && !binaryOk)
     return c.json({ error: 'Content-Type must be application/json' }, 415);
   await next();
 });
@@ -51,6 +58,13 @@ api.get('/home', (c) => c.json(app.stats.home()));
 api.get('/meta', (c) => c.json({ types: QTYPES.map((t) => ({ id: t, label: TYPE_LABELS[t] })) }));
 api.get('/settings', (c) => c.json(app.settings()));
 api.patch('/settings', async (c) => c.json(app.updateSettings(await c.req.json())));
+// ---- Schedule optimization (FSRS weights fitted to your history)
+api.get('/schedule', (c) => c.json(app.scheduleInfo()));
+api.post('/schedule/optimize', async (c) => c.json(await optimize(app.db)));
+api.post('/schedule/weights', async (c) => {
+  const b = await c.req.json();
+  return c.json(applyWeights(app.db, b.weights ?? null, app.settings().retention));
+});
 api.get('/mcp-info', (c) => {
   const token = app.mcpToken();
   const stdio = join(ROOT, 'src', 'mcp', 'stdio.ts');
@@ -162,6 +176,53 @@ api.post('/grades/:attemptId', async (c) => {
 api.get('/attempts/:id/grades', (c) =>
   c.json(app.db.prepare('SELECT * FROM grades WHERE attempt_id = ? ORDER BY id DESC').all(num(c.req.param('id')))),
 );
+
+// ---- Import / export
+api.post('/import/upload', async (c) => {
+  const name = c.req.query('name') ?? 'upload';
+  const format = c.req.query('format') as ImportFormat | undefined;
+  if (format && !FORMATS.includes(format)) throw new Error('Invalid format');
+  return c.json(upload(name, Buffer.from(await c.req.arrayBuffer()), format));
+});
+api.post('/import/preview', async (c) => {
+  const b = await c.req.json();
+  return c.json(importPreview(app.tags, String(b.token), b.options ?? {}));
+});
+api.post('/import/commit', async (c) => {
+  const b = await c.req.json();
+  const r = await importCommit(app, String(b.token), b.options ?? {}, b.tag_map ?? {});
+  app.backfillEmbeddings();
+  return c.json(r);
+});
+api.get('/export/json', (c) => {
+  const day = new Date().toISOString().slice(0, 10);
+  return c.body(JSON.stringify(exportJson(app.db)), 200, {
+    'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="socrates-export-${day}.json"`,
+  });
+});
+/** A consistent snapshot of the whole database (history included), written to a temp file and streamed. */
+api.get('/export/db', (c) => {
+  const dir = mkdtempSync(join(tmpdir(), 'socrates-export-'));
+  const file = join(dir, 'socrates.db');
+  try {
+    app.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+    const data = readFileSync(file);
+    const day = new Date().toISOString().slice(0, 10);
+    return c.body(data, 200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Disposition': `attachment; filename="socrates-${day}.db"` });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+api.get('/backups', (c) => {
+  const dir = join(dirname(app.dbPath), 'backups');
+  if (!existsSync(dir)) return c.json({ dir, items: [] });
+  const items = readdirSync(dir).filter((f) => f.endsWith('.db')).map((f) => {
+    const s = statSync(join(dir, f));
+    return { name: f, bytes: s.size, at: s.mtimeMs };
+  }).sort((a, b) => b.at - a.at);
+  return c.json({ dir, items });
+});
+api.post('/backups', (c) => c.json({ file: backup(app.db, app.dbPath, 'manual') }));
 
 // ---- Audit
 api.get('/audit', (c) => c.json(app.auditLog(Number(c.req.query('limit') ?? 100))));

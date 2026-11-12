@@ -237,3 +237,41 @@ Fixed along the way:
 Answer handling for every type lives in `web/src/components/answers.tsx`, shared by the study runner and the exam runner.
 
 Not done (later): running code in languages other than JavaScript, hotspots with more than one click.
+
+---
+
+## 15. Phase 4 as built (2026-11-12)
+
+Done:
+- **Schedule fitting** (`src/core/optimize.ts`): fits the 21 FSRS-6 weights to your review history (log loss of predicted recall, Adam on normalised weights, a pull towards the starting weights that fades with more data, the decay weight only fitted from 1,000 reviews). The fit runs in a worker thread. Before anything changes, Settings shows prediction and calibration error on cards held out of the fit. Applying recomputes every card's memory state from its history and moves review due dates to match. The forward pass is tested against ts-fsrs's own scheduler.
+- **Command palette** (`Ctrl+K`): pages, actions (theme, export, backup), "Study next" sessions, every mode, practice by tag, and question search. Fuzzy matching favours word starts.
+- **Import** (`src/core/importer.ts`, `src/core/zip.ts`): Anki `.apkg`/`.colpkg` in both the old format and the new zstd/protobuf one (no dependencies: a small zip reader, Node's zstd, `node:sqlite`); CSV/TSV with delimiter and header detection; Markdown; and Socrates JSON. Upload, then preview, then commit. Tags go through the normal resolver, so lookalikes map onto existing tags unless you say otherwise. Questions go through the normal add pipeline, so duplicates are skipped. Anki notes are idempotent by GUID.
+- **Export and backups**: JSON export (tags with aliases, all questions, embedded images), a full database download (`VACUUM INTO` a snapshot), a backup list, and "Back up now".
+- **PWA**: manifest, icons and a service worker. Hashed assets and media are cache-first; pages and a few small API reads are network-first, with the cache as a fallback.
+
+Performance pass (measured on 25,000 questions):
+
+| | Before | After |
+|---|---|---|
+| Duplicate check per added question | ~25 ms, growing with the library | ~1.2 ms |
+| Add (bulk, per question) | ~25 ms | ~2.4 ms |
+| Recommendations | 3,800 ms | 27 ms |
+| Tag tree | 77 ms | 9 ms |
+| Start spaced review / practice / exam | 110 / 82 / 66 ms | 27 / 22 / 18 ms |
+| Start adaptive | 353 ms | ~100 ms |
+| Submit an answer | | 0.6 ms median |
+
+What was slow:
+- The duplicate prefilter OR-ed the longest words, so it matched most of a large library and ranked every match. It now asks for any two of the five rarest words, using FTS5's own stems and document counts.
+- "Untouched tag" recommendations used a correlated `NOT EXISTS` per row.
+- Tag counts used a subquery per tag.
+- Session queries inlined 25k ids into `IN (...)`. Big id sets now go through a temp table.
+
+The library is paginated (50 per page), so no list virtualization was needed. Large imports yield between chunks of 100 so the server stays responsive.
+
+Also fixed:
+- `|` inside `$...$` math no longer splits cloze alternatives, and `\|` is a literal pipe.
+- Anki cloze answers keep their pipes.
+- Plural wording in recommendations.
+
+Not done (later): Anki review history import, audio, image occlusion; running code in languages other than JavaScript; hotspots with more than one click; calibrated difficulty shown in the editor.
