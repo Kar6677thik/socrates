@@ -5,6 +5,10 @@ import { Md } from '../lib/md';
 import { useKeys } from '../lib/keys';
 import { Button, Field, Badge, Card, Segmented, toast, Kbd } from '../components/ui';
 import { TagInput } from '../components/TagInput';
+import { PromptField, ClozeHelp, MatchingForm, OrderingForm, CodeForm, HotspotForm } from '../components/EditorExtras';
+
+/** Cloze answers (first alternative of each {{cN::…}}), for previews. */
+const clozeAnswers = (prompt: string) => [...prompt.matchAll(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g)].map((m) => m[1].split('|')[0]);
 
 export interface Draft {
   type: QType;
@@ -25,6 +29,11 @@ const DEFAULT_SPEC: Record<QType, any> = {
   numeric: { answer: 0 },
   short_answer: { model_answer: '', rubric: [] },
   flashcard: { back: '' },
+  matching: { pairs: [{ left: '', right: '' }, { left: '', right: '' }, { left: '', right: '' }] },
+  ordering: { items: ['', '', ''] },
+  cloze: {},
+  code: { language: 'javascript', function_name: 'solution', starter: 'function solution() {\n  \n}\n', tests: [{ args: [], expected: null }] },
+  hotspot: { image: '', regions: [] },
 };
 
 export const toDraft = (q: Question): Draft => ({
@@ -38,6 +47,17 @@ export function toPayload(d: Draft) {
   if (d.type === 'mcq_single' || d.type === 'mcq_multi') spec.options = spec.options.map((o: string) => o.trim());
   if (d.type === 'fill_blank') spec.blanks = spec.blanks.map((b: any) => ({ ...b, accept: b.accept.map((a: string) => a.trim()).filter(Boolean) }));
   if (d.type === 'short_answer' && !spec.rubric?.length) delete spec.rubric;
+  if (d.type === 'matching') {
+    spec.pairs = spec.pairs.map((p: any) => ({ left: p.left.trim(), right: p.right.trim() }));
+    spec.distractors = (spec.distractors ?? []).map((x: string) => x.trim()).filter(Boolean);
+    if (!spec.distractors.length) delete spec.distractors;
+  }
+  if (d.type === 'ordering') spec.items = spec.items.map((x: string) => x.trim());
+  if (d.type === 'code') {
+    if (!/^(js|javascript)$/i.test(spec.language)) { delete spec.tests; delete spec.function_name; }
+    else if (!spec.tests?.length) delete spec.tests;
+    for (const k of ['starter', 'reference_solution', 'function_name']) if (!spec[k]) delete spec[k];
+  }
   if (d.type === 'numeric') {
     spec.answer = Number(spec.answer);
     if (spec.tolerance === '' || spec.tolerance == null) delete spec.tolerance; else spec.tolerance = Number(spec.tolerance);
@@ -71,9 +91,14 @@ export function QuestionForm({ draft, onChange }: { draft: Draft; onChange: (d: 
         </select>
       </Field>
 
-      <Field label="Question" hint={draft.type === 'fill_blank' ? 'Mark each blank with {{blank}}. Markdown, $LaTeX$ and ```code``` work.' : 'Markdown, $LaTeX$, $$display math$$ and ```code``` blocks work.'}>
-        <textarea className="field font-mono text-[13px]" rows={5} value={draft.prompt} onChange={(e) => set({ prompt: e.target.value })} />
+      <Field label="Question" hint={draft.type === 'fill_blank' ? 'Mark each blank with {{blank}}. Markdown, $LaTeX$ and ```code``` work. Paste or drop images.' : 'Markdown, $LaTeX$, $$display math$$ and ```code``` blocks work. Paste or drop images.'}>
+        <PromptField value={draft.prompt} onChange={(prompt) => set({ prompt })} />
       </Field>
+      {draft.type === 'cloze' && <ClozeHelp />}
+      {draft.type === 'matching' && <MatchingForm s={s} spec={spec} />}
+      {draft.type === 'ordering' && <OrderingForm s={s} spec={spec} />}
+      {draft.type === 'code' && <CodeForm s={s} spec={spec} />}
+      {draft.type === 'hotspot' && <HotspotForm s={s} spec={spec} />}
 
       {(draft.type === 'mcq_single' || draft.type === 'mcq_multi') && (
         <Field label={draft.type === 'mcq_single' ? 'Options (select the correct one)' : 'Options (select all correct)'}>
@@ -235,6 +260,37 @@ export function QuestionView({ d }: { d: Draft }) {
           </div>
         )}
         {d.type === 'flashcard' && <div className="border-t border-line pt-3"><Md src={s.back || '–'} /></div>}
+        {d.type === 'cloze' && (
+          <div className="text-muted text-[13px]">
+            {clozeAnswers(d.prompt).length ? <>Answers: {clozeAnswers(d.prompt).map((a, i) => <span key={i} className="text-good">{i ? ', ' : ''}{a}</span>)}</> : <span className="text-bad">No {'{{c1::…}}'} clozes yet.</span>}
+          </div>
+        )}
+        {d.type === 'matching' && (
+          <div className="space-y-1.5">
+            {s.pairs.map((p: any, i: number) => (
+              <div key={i} className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center rounded-lg border border-line px-3 py-1.5">
+                <Md src={p.left || '–'} /><span className="text-faint">→</span><Md src={p.right || '–'} className="text-good" />
+              </div>
+            ))}
+            {s.distractors?.length > 0 && <div className="text-[12.5px] text-faint">Distractors: {s.distractors.join(', ')}</div>}
+          </div>
+        )}
+        {d.type === 'ordering' && <ol className="list-decimal pl-5 space-y-0.5">{s.items.map((it: string, i: number) => <li key={i}><Md src={it || '–'} inline /></li>)}</ol>}
+        {d.type === 'code' && (
+          <div className="space-y-2">
+            <div className="text-[12.5px] text-faint font-mono">{s.language}{s.tests?.length && /^(js|javascript)$/i.test(s.language) ? ` · ${s.tests.length} tests (${s.tests.filter((t: any) => t.hidden).length} hidden)` : ' · graded against reference'}</div>
+            {s.starter && <Md src={'```' + s.language + '\n' + s.starter + '\n```'} />}
+            {s.reference_solution && <><div className="text-[12px] text-faint">Reference solution</div><Md src={'```' + s.language + '\n' + s.reference_solution + '\n```'} /></>}
+          </div>
+        )}
+        {d.type === 'hotspot' && (s.image ? (
+          <div className="relative inline-block max-w-full rounded-lg overflow-hidden border border-line">
+            <img src={s.image} alt="" className="block max-w-full max-h-[40vh]" />
+            {(s.regions ?? []).map((r: any, i: number) => (
+              <div key={i} className="absolute border-2 rounded" title={r.label} style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%`, borderColor: 'var(--good)', background: 'var(--good-soft)' }} />
+            ))}
+          </div>
+        ) : <div className="text-faint text-[13px]">No image yet.</div>)}
       </div>
       {d.explanation && <div className="mt-4"><div className="text-[12px] text-faint mb-1">Explanation</div><Md src={d.explanation} className="text-muted" /></div>}
       {d.hints.length > 0 && <div className="mt-3 text-[13px] text-muted">{d.hints.length} hint{d.hints.length > 1 ? 's' : ''}</div>}

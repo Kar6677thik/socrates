@@ -118,7 +118,9 @@ function Shell({ children }: { children: ReactNode }) {
             ['Search library', '/'], ['New question (library)', 'n'],
             ['— While studying —', ''], ['Pick option', '1–9'], ['True / false', 't  f'], ['Submit / next', 'Enter'],
             ['Submit written answer', 'Ctrl+Enter'], ['Reveal flashcard', 'Space'], ['Rate flashcard', '1–4'],
-            ['Confidence', 'q w e r  (Alt+1–4 while typing)'], ['Hint', 'h  (Alt+H)'], ['Flag question', 'x'], ['Skip', 's'], ['Undo last answer', 'z'], ['Edit question', 'e'], ['Leave session', 'Esc'],
+            ['Confidence', 'q w e r  (Alt+1–4 while typing)'], ['Hint', 'h  (Alt+H)'], ['Flag question', 'x'], ['Skip', 's'], ['Undo last answer', 'z'], ['Open in library', 'o'], ['Leave session', 'Esc'],
+            ['Matching: assign / move row', '1–9  /  ↑ ↓'], ['Ordering: pick / move item', '↑ ↓  /  Alt+↑ ↓'], ['Code: run tests / submit', "Ctrl+'  /  Ctrl+Enter"],
+            ['— Exam —', ''], ['Previous / next', '← →'], ['Mark for review', 'm'], ['Submit exam', 'Ctrl+Enter'],
             ['— Drafts —', ''], ['Approve / reject', 'a  /  x'], ['Next / previous', 'j  /  k'], ['Edit', 'e'],
           ].map(([a, b], i) => (
             <div key={i} className={`flex justify-between py-1 ${b ? 'border-b border-line' : 'text-faint pt-3'}`}>

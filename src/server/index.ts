@@ -10,7 +10,9 @@ import { App } from '../core/app.ts';
 import { backupIfDue } from '../core/db.ts';
 import { buildMcpServer } from '../mcp/server.ts';
 import { TagError } from '../core/tags.ts';
-import { QTYPES, TYPE_LABELS } from '../core/qtypes.ts';
+import { QTYPES, TYPE_LABELS, codeAutoGraded } from '../core/qtypes.ts';
+import { runJs, redact } from '../core/coderun.ts';
+import { saveImage, fetchImage, decodeBase64, mimeFor, mediaDir } from '../core/media.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST = join(ROOT, 'web', 'dist');
@@ -130,7 +132,23 @@ api.get('/questions/:id/hint/:i', (c) => c.json({ hint: app.study.hint(num(c.req
 api.post('/sessions', async (c) => c.json(app.study.startSession(await c.req.json())));
 api.get('/sessions/:id', (c) => c.json(app.study.loadSession(num(c.req.param('id')))));
 api.post('/sessions/:id/end', (c) => c.json(app.study.endSession(num(c.req.param('id')))));
-api.post('/attempts', async (c) => c.json(app.study.submit(await c.req.json())));
+api.post('/attempts', async (c) => c.json(await app.study.submitAsync(await c.req.json())));
+/** Run JavaScript code against a question's visible + hidden tests without recording an attempt. */
+api.post('/code/run', async (c) => {
+  const b = await c.req.json();
+  const q = app.questions.get(num(String(b.question_id)));
+  if (!q || q.type !== 'code' || !codeAutoGraded(q.spec)) throw new Error('This question has no runnable tests.');
+  return c.json(redact(await runJs(String(b.code ?? ''), q.spec.tests, q.spec.function_name ?? 'solution')));
+});
+/** Editor: run a draft's tests against its reference solution before saving. */
+api.post('/code/check', async (c) => {
+  const b = await c.req.json();
+  return c.json(await runJs(String(b.code ?? ''), b.tests ?? [], b.function_name || 'solution'));
+});
+api.post('/media', async (c) => {
+  const b = await c.req.json();
+  return c.json(b.url ? saveImage(await fetchImage(String(b.url))) : saveImage(decodeBase64(String(b.data ?? ''))));
+});
 api.post('/attempts/:id/undo', (c) => c.json(app.study.undo(num(c.req.param('id')))));
 api.get('/recommendations', (c) => c.json(app.stats.recommendations()));
 api.get('/analytics', (c) => c.json(app.stats.analytics({ days: c.req.query('days') ? Number(c.req.query('days')) : undefined, tag: c.req.query('tag') || undefined })));
@@ -175,6 +193,17 @@ root.all('/mcp/t/:token', async (c) => {
 });
 
 root.route('/api', api);
+
+// Uploaded images: local only, immutable (content-addressed names).
+root.get('/media/:file', (c) => {
+  if (!LOCAL_HOSTS.test(c.req.header('host') ?? '')) return c.text('Not found', 404);
+  const file = c.req.param('file');
+  const type = mimeFor(file);
+  if (!/^[a-f0-9]{32}\.[a-z]+$/.test(file) || !type || !existsSync(join(mediaDir(), file))) return c.text('Not found', 404);
+  return c.body(readFileSync(join(mediaDir(), file)), 200, {
+    'Content-Type': type, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff',
+  });
+});
 
 // ---- Static UI (built). In dev, Vite serves the UI and proxies /api here.
 if (existsSync(DIST)) {

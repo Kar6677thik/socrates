@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, useApi, invalidate, ago, type Question } from '../lib/api';
 import { useKeys } from '../lib/keys';
-import { Md } from '../lib/md';
+import { MdLine } from '../lib/md';
 import { Button, Card, Empty, PageHeader, Badge, toast } from '../components/ui';
 import { QuestionView, QuestionForm, toDraft, toPayload, type Draft } from './Editor';
 
@@ -57,7 +57,7 @@ export default function Review() {
           <div className="rounded-xl border border-line bg-panel overflow-hidden max-h-[70vh] overflow-y-auto max-lg:hidden">
             {items.map((it, k) => (
               <button key={it.id} onClick={() => setI(k)} className={`w-full text-left px-3 py-2.5 text-[12.5px] ${k ? 'border-t border-line' : ''} ${it.id === q.id ? 'bg-hover' : 'hover:bg-hover'}`}>
-                <Md src={it.prompt.replace(/\{\{\s*blank\s*\}\}/g, '___')} className="line-clamp-2" />
+                <MdLine src={it.prompt} />
                 <div className="text-faint text-[11.5px] mt-0.5">{ago(it.created_at)}</div>
               </button>
             ))}

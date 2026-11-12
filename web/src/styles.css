@@ -211,6 +211,19 @@ textarea.field {
 .md-inline > p {
   display: inline;
 }
+/* Single-line preview: everything inline, clipped with an ellipsis. */
+.md-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.md-line > * {
+  display: inline;
+  margin: 0 !important;
+}
+.md-line .katex {
+  font-size: 1em;
+}
 
 /* Restrained syntax colours: mostly weight and greys, one accent. */
 .hljs-keyword,

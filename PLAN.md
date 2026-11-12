@@ -223,3 +223,17 @@ Findings that changed the design:
 - **Weak mode picks leaf tags under 65% mastery** (parents only average their children), falling back to the single weakest tag.
 
 Not done (moved to later phases): FSRS weight optimization from your own history (Phase 4), per-question difficulty shown in the editor.
+
+---
+
+## 14. Phase 3 as built (2026-11-12)
+
+Done: matching, ordering, cloze, code and image hotspot types end to end (grading, MCP, answer UI with keyboard support, editor forms, previews); a JavaScript test runner (worker + VM, per-test timeout, hard kill, memory cap, no host access; hidden tests redacted); image uploads (paste or drop in the editor, MCP `upload_image`, raster only, private URLs refused); exam mode (navigator, mark for review, change answers, submit all, review screen, blanks score zero, flashcards excluded); a time limit for any mode; one-line markdown previews so lists render LaTeX.
+
+Fixed along the way:
+- The `e` key was bound to both "Likely" confidence and "edit question"; edit is now `o`.
+- Code tests compared values through JSON, so `-Infinity`, `NaN` and `undefined` passed as `null`. They are now kept distinct.
+
+Answer handling for every type lives in `web/src/components/answers.tsx`, shared by the study runner and the exam runner.
+
+Not done (later): running code in languages other than JavaScript, hotspots with more than one click.

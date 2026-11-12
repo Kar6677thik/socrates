@@ -39,7 +39,7 @@ export const invalidate = (...prefixes: string[]) =>
 
 // ---------- Shared types (mirrors the server) ----------
 
-export type QType = 'mcq_single' | 'mcq_multi' | 'true_false' | 'fill_blank' | 'numeric' | 'short_answer' | 'flashcard';
+export type QType = 'mcq_single' | 'mcq_multi' | 'true_false' | 'fill_blank' | 'cloze' | 'numeric' | 'matching' | 'ordering' | 'short_answer' | 'code' | 'hotspot' | 'flashcard';
 
 export const TYPE_LABELS: Record<QType, string> = {
   mcq_single: 'Multiple choice',
@@ -49,6 +49,11 @@ export const TYPE_LABELS: Record<QType, string> = {
   numeric: 'Numeric',
   short_answer: 'Written answer',
   flashcard: 'Flashcard',
+  matching: 'Matching',
+  ordering: 'Ordering',
+  cloze: 'Cloze',
+  code: 'Code',
+  hotspot: 'Image hotspot',
 };
 export const TYPES = Object.keys(TYPE_LABELS) as QType[];
 
@@ -130,8 +135,8 @@ export interface Recommendation {
   agent_prompt?: string;
 }
 
-export type Mode = 'srs' | 'adaptive' | 'weak' | 'practice';
-export const MODE_LABELS: Record<Mode, string> = { srs: 'Spaced review', adaptive: 'Adaptive', weak: 'Weak areas', practice: 'Practice' };
+export type Mode = 'srs' | 'adaptive' | 'weak' | 'practice' | 'exam';
+export const MODE_LABELS: Record<Mode, string> = { srs: 'Spaced review', adaptive: 'Adaptive', weak: 'Weak areas', practice: 'Practice', exam: 'Exam' };
 
 /** Tag paths are stored as slugs; show them as readable breadcrumbs. */
 export function tagLabel(path: string, names?: Map<string, string>) {

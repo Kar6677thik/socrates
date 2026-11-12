@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { type DB, tx, now, getSetting } from './db.ts';
 import { Tags, type Suggestion } from './tags.ts';
-import { SPECS, QTYPES, type QType, checkSpec, answerKey, searchBody, publicSpec } from './qtypes.ts';
+import { SPECS, QTYPES, type QType, checkSpec, answerKey, searchBody, publicSpec, clozeParts, clozePublicPrompt } from './qtypes.ts';
 import { contentHash, textVector, cosine, ftsQuery, normalizeText } from './text.ts';
 import { embed, embedText, toBlob, fromBlob, dot } from './embed.ts';
 
@@ -24,6 +24,11 @@ function coreAnswer(type: QType, spec: any): string {
     case 'numeric': return String(spec.answer);
     case 'short_answer': return spec.model_answer;
     case 'flashcard': return spec.back;
+    case 'matching': return spec.pairs.map((p: any) => `${p.left} ${p.right}`).sort().join(' ');
+    case 'ordering': return spec.items.join(' ');
+    case 'cloze': return '';
+    case 'code': return spec.reference_solution ?? '';
+    case 'hotspot': return JSON.stringify(spec.regions);
   }
 }
 
@@ -159,8 +164,9 @@ export class Questions {
     return {
       id: q.id,
       type: q.type,
-      prompt: q.prompt,
-      spec: publicSpec(q.type, q.spec),
+      // Cloze answers live in the prompt itself, so they are swapped for blanks here.
+      prompt: q.type === 'cloze' ? clozePublicPrompt(q.prompt) : q.prompt,
+      spec: q.type === 'cloze' ? { blanks: clozeParts(q.prompt).length } : publicSpec(q.type, q.spec),
       hints: q.hints.length,
       difficulty: q.difficulty,
       group_id: q.group_id,

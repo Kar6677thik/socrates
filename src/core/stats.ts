@@ -1,6 +1,7 @@
 import { type DB, now } from './db.ts';
 import { studyDay, endOfStudyDay, limits, cardRetrievability } from './srs.ts';
 import type { Tags } from './tags.ts';
+import { clozeParts } from './qtypes.ts';
 
 export class Stats {
   db: DB;
@@ -156,6 +157,14 @@ export class Stats {
       else if (r.type === 'numeric') { given = resp.value; expected = spec.answer; }
       else if (r.type === 'short_answer') { given = resp.text; expected = spec.model_answer; }
       else if (r.type === 'flashcard') { given = '(self-rated)'; expected = spec.back; }
+      else if (r.type === 'matching') {
+        const rights = [...spec.pairs.map((p: any) => p.right), ...(spec.distractors ?? [])];
+        given = spec.pairs.map((p: any, i: number) => `${p.left} → ${resp.map[i] == null ? '(none)' : rights[resp.map[i]]}`);
+        expected = spec.pairs.map((p: any) => `${p.left} → ${p.right}`);
+      } else if (r.type === 'ordering') { given = resp.order.map((i: number) => spec.items[i]); expected = spec.items; }
+      else if (r.type === 'cloze') { given = resp.blanks; expected = clozeParts(r.prompt).map((p) => p.accept); }
+      else if (r.type === 'code') { given = resp.code; expected = spec.reference_solution ?? `${spec.tests?.length ?? 0} tests`; }
+      else if (r.type === 'hotspot') { given = { x: resp.x, y: resp.y }; expected = spec.regions; }
       return {
         attempt_id: r.attempt_id, question_id: r.question_id, type: r.type, tags: r.tags?.split(', ') ?? [], prompt: r.prompt,
         given, expected, score: r.score, confidence: r.confidence, time_ms: r.time_ms, feedback: r.feedback ?? undefined,

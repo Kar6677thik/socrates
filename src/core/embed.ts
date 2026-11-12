@@ -36,6 +36,7 @@ function load(): Promise<Extractor | null> {
 /** Text that represents a question's meaning: the prompt without markup noise. */
 export function embedText(prompt: string): string {
   return prompt
+    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, a: string) => a.split('|')[0])
     .replace(/\{\{\s*blank\s*\}\}/g, '___')
     .replace(/```[\w-]*\n?/g, '')
     .replace(/[*_#>`]/g, '')

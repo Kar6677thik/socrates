@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useSearch } from 'wouter';
 import { useApi, tagLabel, useTagNames, TYPES, TYPE_LABELS, api, invalidate, ago, type Question, type QType } from '../lib/api';
-import { plain } from '../lib/md';
+import { MdLine } from '../lib/md';
 import { useKeys } from '../lib/keys';
 import { Button, Chip, Badge, Empty, PageHeader, useDebounced, toast, Kbd } from '../components/ui';
 import { TagInput } from '../components/TagInput';
@@ -117,7 +117,7 @@ export default function Library() {
               />
               <Link href={`/library/${it.id}`} className="flex-1 min-w-0 flex items-center gap-3">
                 <div className="flex-1 min-w-0">
-                  <div className="truncate text-[13.5px]">{plain(it.prompt, 160)}</div>
+                  <MdLine src={it.prompt} className="text-[13.5px]" />
                   <div className="truncate text-[12px] text-faint">{it.tags.map((t) => tagLabel(t.path, names)).join(' · ')}</div>
                 </div>
                 {it.flagged_reason && <Badge tone="warn">flagged</Badge>}

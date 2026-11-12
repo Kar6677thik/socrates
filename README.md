@@ -9,7 +9,7 @@ Requires Node 22.18+ (Node 24 recommended). No native modules, no build step for
 ```bash
 npm install
 npm start          # builds the UI on first run, serves everything at http://localhost:4321
-npm run seed       # optional: 12 sample questions
+npm run seed       # optional: 18 sample questions, at least one of every type
 ```
 
 Development (hot reload UI on :5173, API on :4321):
@@ -34,7 +34,7 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 | Group | Tools |
 |---|---|
 | Tags | `get_tag_tree`, `resolve_tags`, `create_tags`, `add_tag_alias`, `merge_tags`, `move_tag` |
-| Questions | `add_questions` (bulk, `dry_run`, `client_ref`), `check_duplicates`, `update_question`, `set_question_status`, `search_questions`, `get_questions` |
+| Questions | `add_questions` (bulk, `dry_run`, `client_ref`), `check_duplicates`, `update_question`, `set_question_status`, `search_questions`, `get_questions`, `upload_image` |
 | Grading | `list_pending_grades`, `submit_grades` |
 | Performance | `get_performance_summary`, `get_weak_areas` (calibrated mastery), `get_recommendations`, `get_recent_mistakes`, `get_coverage_gaps` |
 | Sessions | `create_quiz` |
@@ -49,11 +49,19 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 - Questions: exact duplicates and anything ≥ 0.92 similar in wording are rejected; 0.85–0.92 is accepted and flagged as a near duplicate.
 - Questions that *mean* the same thing (local embeddings, ≥ 0.85) are flagged, never rejected, and only when the answers agree too. Embeddings rate a statement and its converse ("every square matrix is invertible" / "every invertible matrix is square") as close as a true paraphrase, so the answer check is what separates them. The model (all-MiniLM-L6-v2, ~23 MB) downloads into `data/models/` on first use; offline, checks fall back to wording only.
 
+## Question types
+
+Multiple choice (single and multiple answer), true/false, fill in the blank, cloze (`{{c1::answer}}`), numeric (tolerance, units), matching (with distractors), ordering (partial credit by pairwise order), written answer and essay (rubric, graded by you or your agent), code, image hotspot, and flashcards. Prompts take markdown, LaTeX, code blocks and images; paste or drop an image into the editor to upload it.
+
+**Code:** JavaScript questions with tests are graded automatically. Your code runs in an isolated worker with a time limit and no access to files, the network or the host process; hidden tests only report pass or fail. Other languages are graded against a reference solution by you or your agent.
+
+**Images** are stored in `data/media/` under their content hash. PNG, JPEG, GIF, WebP and AVIF only: SVG is refused because it can carry scripts. When the agent passes a URL, the server only downloads public https addresses, never private or local ones.
+
 ## Engine
 
 - **Scheduling:** FSRS-6. The rating comes from correctness, speed against your usual time, confidence and hints.
 - **Calibration:** an Elo/IRT model updates your ability per tag (parents at half weight) and each question's difficulty after every graded answer. "Mastery" is the predicted chance of answering an average-difficulty question in that tag.
-- **Modes:** *Spaced review* (due + new), *Adaptive* (mix of due, weak and new, aiming at ~80% predicted success), *Weak areas* (lowest-mastery tags), *Practice* (weighted random). Save any setup as a preset.
+- **Modes:** *Spaced review* (due + new), *Adaptive* (mix of due, weak and new, aiming at ~80% predicted success), *Weak areas* (lowest-mastery tags), *Practice* (weighted random), *Exam* (random sample spread across tags, no feedback until you submit, mark questions for review, then a full review screen; blank answers score zero). Any mode can have a time limit. Save any setup as a preset.
 - **Leeches:** a question forgotten 6 times (configurable) is flagged and leaves the queue until rewritten.
 - **Undo:** `z` reverts the last answer, including schedule and calibration.
 - **Analytics:** accuracy over time, tag mastery with 14-day trend, forgetting curve and schedule calibration, speed vs accuracy, confidence calibration, difficulty, type, time of day, hesitation and answer changes.
@@ -61,7 +69,7 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 
 ## Keyboard
 
-Press `?` anywhere. The essentials: `Enter` on Home starts your review; in a session `1–9` pick, `Enter` checks/next, `q w e r` confidence, `h` hint, `x` flag, `s` skip, `z` undo, `e` edit, `Esc` end. `g` then a letter jumps between pages. `\` toggles light/dark.
+Press `?` anywhere. The essentials: `Enter` on Home starts your review; in a session `1–9` pick, `Enter` checks/next, `q w e r` confidence, `h` hint, `x` flag, `s` skip, `z` undo, `o` open in library, `Esc` end. Matching: digits assign, ↑/↓ change row. Ordering: ↑/↓ pick, Alt+↑/↓ move. Code: Ctrl+' runs tests, Ctrl+Enter submits. Exam: ←/→ move between questions, `m` marks, Ctrl+Enter submits. `g` then a letter jumps between pages. `\` toggles light/dark.
 
 ## Tests
 

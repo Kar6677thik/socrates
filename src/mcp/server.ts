@@ -5,6 +5,7 @@ import { QTYPES, TYPE_LABELS, type QType } from '../core/qtypes.ts';
 import { TagError } from '../core/tags.ts';
 import { MAX_BATCH, DUPLICATE_THRESHOLD, NEAR_DUPLICATE_THRESHOLD } from '../core/questions.ts';
 import { embed, embedText } from '../core/embed.ts';
+import { saveImage, fetchImage, decodeBase64 } from '../core/media.ts';
 
 export const APP_URL = process.env.SOCRATES_URL ?? 'http://localhost:4321';
 
@@ -35,6 +36,11 @@ const TYPE_DOC = `Types and their fields (in addition to type, prompt, tags, dif
 - numeric: answer (number), tolerance?, relative? (tolerance as fraction), unit?
 - short_answer: model_answer, rubric? [{criterion, points}], long? (essay box). Graded by you via submit_grades.
 - flashcard: back (answer side). Self-rated by the user.
+- matching: pairs [{left, right}] (2-12), distractors? (extra right items). Partial credit per pair.
+- ordering: items in the CORRECT order (3-12); shown shuffled. Partial credit by pairwise order.
+- cloze: no extra fields; the prompt holds the answers: "The capital of France is {{c1::Paris}}". Alternatives with |, hint after :: as in {{c1::H2O|water::formula}}.
+- code: language, starter?, then EITHER tests [{args: [...], expected, hidden?}] calling function_name (default "solution") for javascript (auto-graded), OR reference_solution for any language (graded by you via submit_grades).
+- hotspot: image (/media/... URL from upload_image), regions [{x, y, w, h, label?}] as fractions of the image, top-left origin. One click; inside any region is correct.
 Content is markdown; LaTeX with $...$ and $$...$$; fenced code blocks; images via markdown URLs.`;
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v) }] });
@@ -208,6 +214,17 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
       rubric: z.array(z.object({ criterion: z.string(), points: z.number() })).optional(),
       long: z.boolean().optional(),
       back: z.string().optional(),
+      pairs: z.array(z.object({ left: z.string(), right: z.string() })).optional(),
+      distractors: z.array(z.string()).optional(),
+      items: z.array(z.string()).optional(),
+      case_sensitive: z.boolean().optional(),
+      language: z.string().optional(),
+      starter: z.string().optional(),
+      function_name: z.string().optional(),
+      tests: z.array(z.object({ args: z.array(z.any()), expected: z.any(), hidden: z.boolean().optional() })).optional(),
+      reference_solution: z.string().optional(),
+      image: z.string().optional(),
+      regions: z.array(z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number(), label: z.string().optional() })).optional(),
     })
     .passthrough();
 
@@ -337,6 +354,23 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
     })),
   );
 
+  server.registerTool(
+    'upload_image',
+    {
+      title: 'Upload image',
+      description:
+        'Store an image for use in questions (markdown ![alt](url) or a hotspot image). Give base64 data or a public https URL. PNG, JPEG, GIF, WebP or AVIF, max 5 MB. Returns the /media/... URL to put in the question.',
+      inputSchema: {
+        data_base64: z.string().optional().describe('Image bytes, base64 (a data: URL prefix is fine)'),
+        url: z.string().optional().describe('Public https URL to download'),
+      },
+    },
+    write('upload_image', async ({ data_base64, url }: { data_base64?: string; url?: string }) => {
+      if (!data_base64 === !url) throw new Error('Give exactly one of data_base64 or url.');
+      return { result: saveImage(url ? await fetchImage(url) : decodeBase64(data_base64!)) };
+    }),
+  );
+
   // ---------------- Grading ----------------
 
   server.registerTool(
@@ -448,9 +482,10 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string } = {})
     {
       title: 'Create quiz',
       description:
-        'Create a study session and return a link the user can open. Modes: "srs" = due reviews + new; "adaptive" (default) = mix of due, weak and new aimed at ~80% predicted success; "weak" = concentrate on lowest-mastery tags; "practice" = weighted random sample.',
+        'Create a study session and return a link the user can open. Modes: "srs" = due reviews + new; "adaptive" (default) = mix of due, weak and new aimed at ~80% predicted success; "weak" = concentrate on lowest-mastery tags; "practice" = weighted random sample; "exam" = random sample spread across tags, no feedback until the end. time_limit_s adds a countdown to any mode.',
       inputSchema: {
-        mode: z.enum(['srs', 'adaptive', 'weak', 'practice']).optional(),
+        mode: z.enum(['srs', 'adaptive', 'weak', 'practice', 'exam']).optional(),
+        time_limit_s: z.number().int().min(30).max(21600).optional(),
         tags: z.array(z.string()).optional(),
         types: z.array(typeEnum).optional(),
         difficulty: z.tuple([z.number().int(), z.number().int()]).optional(),

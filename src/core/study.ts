@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { type DB, tx, now } from './db.ts';
 import { Questions, type Question } from './questions.ts';
-import { QTYPES, type QType, autoGrade, RESPONSES, AUTO_GRADED } from './qtypes.ts';
+import { QTYPES, type QType, autoGrade, RESPONSES, AUTO_GRADED, codeAutoGraded, clozeParts, type GradeResult } from './qtypes.ts';
+import { runJs, redact } from './coderun.ts';
 import { studyDay, endOfStudyDay, limits, review, deriveRating, baselineMs, cardRetrievability, loadCard, Rating } from './srs.ts';
 import { Engine, sigmoid, type EngineBefore } from './engine.ts';
 import { getSetting } from './db.ts';
 
-export const MODES = ['srs', 'adaptive', 'weak', 'practice'] as const;
+export const MODES = ['srs', 'adaptive', 'weak', 'practice', 'exam'] as const;
 export type Mode = (typeof MODES)[number];
 
 export const SessionConfig = z.object({
@@ -15,8 +16,11 @@ export const SessionConfig = z.object({
    * adaptive: mixes due, weak and new, aiming for ~80% predicted success.
    * weak: concentrates on the lowest-mastery tags.
    * practice: weighted random sample.
+   * exam: random sample spread across tags; no feedback until the end.
    */
   mode: z.enum(MODES).default('srs'),
+  /** Whole-session time limit in seconds (any mode). */
+  time_limit_s: z.number().int().min(30).max(6 * 3600).optional(),
   tags: z.array(z.string()).optional(),
   types: z.array(z.enum(QTYPES as [QType, ...QType[]])).optional(),
   difficulty: z.tuple([z.number().int().min(1).max(5), z.number().int().min(1).max(5)]).optional(),
@@ -40,6 +44,8 @@ export const AttemptInput = z.object({
   self_rating: z.number().int().min(1).max(4).optional(),
   /** Short answer: user grades themselves instead of waiting for the agent (0..1). */
   self_score: z.number().min(0).max(1).optional(),
+  /** Exam: the question was left blank. Scores 0 without grading the default state. */
+  unanswered: z.boolean().optional(),
   events: z.array(z.object({ t: z.number(), kind: z.string(), data: z.unknown().optional() })).max(500).optional(),
 });
 export type AttemptInput = z.infer<typeof AttemptInput>;
@@ -101,6 +107,21 @@ export class Study {
     return this.interleave(out);
   }
 
+  /** Exam blueprint: round-robin over primary tags so every topic is represented, random within each. */
+  private examQueue(pool: number[], limit: number): number[] {
+    const rows = this.db
+      // Flashcards are self-rated, so they don't belong in an exam.
+      .prepare(`SELECT q.id, (SELECT MIN(tag_id) FROM question_tags WHERE question_id = q.id) tag FROM questions q WHERE q.id IN (${pool.join(',')}) AND q.type != 'flashcard'`)
+      .all() as { id: number; tag: number }[];
+    const buckets = new Map<number, number[]>();
+    for (const r of rows.sort(() => Math.random() - 0.5)) buckets.set(r.tag, [...(buckets.get(r.tag) ?? []), r.id]);
+    const lists = [...buckets.values()].sort(() => Math.random() - 0.5);
+    const out: number[] = [];
+    for (let i = 0; out.length < limit && lists.some((l) => l.length > i); i++)
+      for (const l of lists) if (l[i] !== undefined && out.length < limit) out.push(l[i]);
+    return out.sort(() => Math.random() - 0.5);
+  }
+
   /** Weakest tags (lowest mastery with enough evidence) as paths. */
   weakestTagPaths(n = 3): string[] {
     // Leaf tags only (parents just average their children), below 65% mastery; else the single weakest.
@@ -155,6 +176,7 @@ export class Study {
     const pool = this.pool(c);
     if (!pool.length) return [];
     if (c.mode === 'adaptive' || c.mode === 'weak') return this.adaptiveQueue(pool, c, at);
+    if (c.mode === 'exam') return this.examQueue(pool, c.limit ?? 30);
     const inPool = pool.join(',');
     if (c.mode === 'practice') {
       const stats = new Map(
@@ -231,7 +253,7 @@ export class Study {
       .prepare('INSERT INTO sessions(mode, config, queue, started_at) VALUES(?, ?, ?, ?)')
       .run(c.mode, JSON.stringify(c), JSON.stringify(queue), now());
     const qs = this.q.getMany(queue);
-    return { session_id: Number(info.lastInsertRowid), mode: c.mode, questions: qs.map((x) => this.q.toPublic(x)) };
+    return { session_id: Number(info.lastInsertRowid), mode: c.mode, time_limit_s: c.time_limit_s ?? null, questions: qs.map((x) => this.q.toPublic(x)) };
   }
 
   /** Remaining (unanswered) questions of an existing session, e.g. one an agent created. */
@@ -241,7 +263,11 @@ export class Study {
     const done = new Set((this.db.prepare('SELECT question_id FROM attempts WHERE session_id = ?').all(id) as { question_id: number }[]).map((r) => r.question_id));
     const queue = (JSON.parse(s.queue) as number[]).filter((qid) => !done.has(qid));
     const qs = this.q.getMany(queue).filter((q) => q.status === 'active');
-    return { session_id: id, mode: s.mode, answered: done.size, ended: !!s.ended_at, questions: qs.map((x) => this.q.toPublic(x)) };
+    const cfg = JSON.parse(s.config);
+    return {
+      session_id: id, mode: s.mode, answered: done.size, ended: !!s.ended_at, started_at: s.started_at,
+      time_limit_s: cfg.time_limit_s ?? null, questions: qs.map((x) => this.q.toPublic(x)),
+    };
   }
 
   endSession(id: number) {
@@ -265,7 +291,20 @@ export class Study {
   }
 
   /** Grade and record an attempt, update the schedule, and return the answer for feedback. */
-  submit(input: unknown) {
+  /** Submit, running JavaScript tests first for auto-graded code questions. */
+  async submitAsync(input: unknown) {
+    const a = AttemptInput.parse(input);
+    const q = this.q.get(a.question_id);
+    if (q?.type === 'code' && codeAutoGraded(q.spec) && a.self_score === undefined && !a.unanswered) {
+      const code = String((a.response as any)?.code ?? '');
+      const r = await runJs(code, q.spec.tests, q.spec.function_name ?? 'solution');
+      const score = r.total ? r.passed / r.total : 0;
+      return this.submit(a, { codeGrade: { score: +score.toFixed(3), correct: score === 1, detail: redact(r) } });
+    }
+    return this.submit(a);
+  }
+
+  submit(input: unknown, opts: { codeGrade?: GradeResult } = {}) {
     const a = AttemptInput.parse(input);
     return tx(this.db, () => {
       const q = this.q.get(a.question_id);
@@ -277,8 +316,13 @@ export class Study {
       let correct: boolean | null = null;
       let detail: unknown;
       let gradeStatus: 'auto' | 'self' | 'pending';
-      if (AUTO_GRADED.includes(q.type)) {
-        const g = autoGrade(q.type, q.spec, resp.data)!;
+      if (a.unanswered) {
+        score = 0; correct = false; gradeStatus = 'auto';
+      } else if (opts.codeGrade) {
+        ({ score, correct, detail } = opts.codeGrade);
+        gradeStatus = 'auto';
+      } else if (AUTO_GRADED.includes(q.type)) {
+        const g = autoGrade(q.type, q.spec, resp.data, q.prompt)!;
         score = g.score; correct = g.correct; detail = g.detail; gradeStatus = 'auto';
       } else if (q.type === 'flashcard') {
         const r = (a.self_rating ?? 3) as 1 | 2 | 3 | 4;
@@ -336,7 +380,7 @@ export class Study {
         detail,
         rating,
         next_due: srs?.due ?? null,
-        answer: q.spec,
+        answer: q.type === 'cloze' ? { blanks: clozeParts(q.prompt) } : q.spec,
         explanation: q.explanation,
         predicted: +pPred.toFixed(3),
         leech,
@@ -428,11 +472,13 @@ export class Study {
         attempt_id: r.id,
         question_id: q.id,
         prompt: q.prompt,
-        model_answer: q.spec.model_answer,
+        type: q.type,
+        language: q.type === 'code' ? q.spec.language : undefined,
+        model_answer: q.spec.model_answer ?? q.spec.reference_solution,
         rubric: q.spec.rubric ?? null,
         explanation: q.explanation,
         tags: q.tags.map((t) => t.path),
-        response: JSON.parse(r.response).text,
+        response: JSON.parse(r.response).text ?? JSON.parse(r.response).code,
         answered_at: r.answered_at,
         time_ms: r.time_ms,
       };

@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'wouter';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation, Link } from 'wouter';
 import { api, useApi, invalidate, pct, fmtMs, fmtDue, tagLabel, useTagNames, TYPES, TYPE_LABELS, MODE_LABELS, type PublicQuestion, type SubmitResult, type QType, type Home, type Mode } from '../lib/api';
-import { Md } from '../lib/md';
+import { Md, MdLine } from '../lib/md';
 import { useKeys } from '../lib/keys';
 import { Button, Chip, Kbd, Segmented, Field, Modal, toast, Card } from '../components/ui';
 import { TagInput } from '../components/TagInput';
 import { startSession } from './Home';
+import Exam from './Exam';
+import { AnswerInput, answerKeys, emptyAnswer, hasAnswer, toResponse, numberBlanks, TEXT_TYPES, MULTILINE, type Answer, type SetAnswer } from '../components/answers';
 
 export default function StudyPage({ sessionId }: { sessionId?: number }) {
   return sessionId ? <Runner key={sessionId} sessionId={sessionId} /> : <Builder />;
@@ -18,6 +20,7 @@ const MODE_HELP: Record<Mode, string> = {
   adaptive: 'A mix of due, weak and new questions, picked so you get about 80% right: hard enough to learn from.',
   weak: 'Concentrates on your lowest-mastery tags. Leave tags empty to let the engine pick them.',
   practice: 'A sample weighted toward questions you miss and ones you have not seen.',
+  exam: 'A random sample spread across your tags. No feedback until you submit; review everything at the end.',
 };
 
 interface Preset { name: string; config: Record<string, any> }
@@ -31,6 +34,7 @@ function Builder() {
   const [types, setTypes] = useState<QType[]>([]);
   const [diff, setDiff] = useState<number[]>([]);
   const [limit, setLimit] = useState(20);
+  const [minutes, setMinutes] = useState(0);
   const [naming, setNaming] = useState<string | null>(null);
   const toggle = <T,>(list: T[], v: T) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
   const config = () => ({
@@ -39,6 +43,7 @@ function Builder() {
     types: types.length ? types : undefined,
     difficulty: diff.length ? [Math.min(...diff), Math.max(...diff)] : undefined,
     limit: mode === 'srs' ? undefined : limit,
+    time_limit_s: minutes ? minutes * 60 : undefined,
   });
   const go = () => startSession(nav, config());
   const load = (p: Preset) => {
@@ -48,6 +53,7 @@ function Builder() {
     setTypes(c.types ?? []);
     setDiff(c.difficulty ? Array.from({ length: c.difficulty[1] - c.difficulty[0] + 1 }, (_, i) => c.difficulty[0] + i) : []);
     setLimit(c.limit ?? 20);
+    setMinutes(c.time_limit_s ? Math.round(c.time_limit_s / 60) : 0);
   };
   const savePresets = async (list: Preset[]) => {
     try { await api.put('/presets', list); refetch(); } catch (e: any) { toast(e.message, 'bad'); }
@@ -74,7 +80,7 @@ function Builder() {
         <Segmented
           value={mode}
           onChange={setMode}
-          options={(['srs', 'adaptive', 'weak', 'practice'] as Mode[]).map((m) => ({
+          options={(['srs', 'adaptive', 'weak', 'practice', 'exam'] as Mode[]).map((m) => ({
             value: m,
             label: m === 'srs' && h ? `${MODE_LABELS[m]} · ${h.due + h.new_available}` : MODE_LABELS[m],
           }))}
@@ -100,6 +106,11 @@ function Builder() {
             </div>
           </Field>
         )}
+        <Field label="Time limit" hint={minutes ? (mode === 'exam' ? 'The exam submits itself when time runs out.' : 'The session ends when time runs out.') : undefined}>
+          <div className="flex gap-1.5 flex-wrap">
+            {[0, 5, 10, 20, 30, 60, 90].map((m) => <Chip key={m} active={minutes === m} onClick={() => setMinutes(m)}>{m ? `${m} min` : 'None'}</Chip>)}
+          </div>
+        </Field>
         <div className="flex items-center gap-2">
           <Button variant="primary" size="lg" kbd="↵" onClick={go}>Start</Button>
           {naming === null ? (
@@ -146,35 +157,59 @@ interface Done {
   time_ms: number;
 }
 
-function numberBlanks(prompt: string) {
-  let n = 0;
-  return prompt.replace(/\{\{\s*blank\s*\}\}/g, () => `⟦${++n}⟧`);
+export interface SessionData {
+  session_id: number;
+  mode: Mode;
+  questions: PublicQuestion[];
+  answered: number;
+  started_at: number;
+  time_limit_s: number | null;
 }
 
-function shuffleFor(id: number, n: number): number[] {
-  // Stable per-question shuffle (seeded by id + day) so re-renders don't reorder options.
-  let seed = (id * 2654435761 + new Date().getDate()) >>> 0;
-  const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-  const a = [...Array(n).keys()];
-  for (let i = n - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+/** "4:05" style countdown text. */
+export const clock = (ms: number) => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
+};
 
 function Runner({ sessionId }: { sessionId: number }) {
+  const { data, error } = useApi<SessionData>(`/sessions/${sessionId}`);
+  if (error) return <div className="p-10 text-muted">{(error as Error).message}</div>;
+  if (!data) return null;
+  if (data.mode === 'exam' && !data.questions.length)
+    return (
+      <div className="max-w-md mx-auto pt-[20vh] px-6 text-center fade-in">
+        <div className="font-medium">This exam has been submitted</div>
+        <div className="text-muted mt-1">Its answers are in your analytics and review schedule.</div>
+        <div className="flex gap-2 justify-center mt-6"><Link href="/analytics"><Button>Analytics</Button></Link><Link href="/study"><Button variant="primary">New session</Button></Link></div>
+      </div>
+    );
+  if (data.mode === 'exam') return <Exam session={data} />;
+  return <Practice session={data} />;
+}
+
+function Practice({ session }: { session: SessionData }) {
   const [, nav] = useLocation();
-  const { data, error } = useApi<{ session_id: number; questions: PublicQuestion[]; answered: number }>(`/sessions/${sessionId}`);
-  const [queue, setQueue] = useState<PublicQuestion[] | null>(null);
+  const sessionId = session.session_id;
+  const [queue, setQueue] = useState<PublicQuestion[]>(session.questions);
   const [idx, setIdx] = useState(0);
   const [done, setDone] = useState<Done[]>([]);
   const [finished, setFinished] = useState(false);
   const [mount, setMount] = useState(0);
+  const deadline = session.time_limit_s ? session.started_at + session.time_limit_s * 1000 : null;
+
+  const finish = useCallback(async () => {
+    setFinished(true);
+    api.post(`/sessions/${sessionId}/end`).catch(() => {});
+    invalidate('/home', '/grades', '/questions', '/analytics', '/recommendations');
+  }, [sessionId]);
 
   useEffect(() => {
-    if (data && !queue) setQueue(data.questions);
-  }, [data, queue]);
+    if (!deadline || finished) return;
+    const t = setTimeout(() => { toast("Time's up"); finish(); }, Math.max(0, deadline - Date.now()));
+    return () => clearTimeout(t);
+  }, [deadline, finished, finish]);
 
   /** Undo an answer: the server restores schedule + calibration, and the question is shown again fresh. */
   const undo = async (attemptId: number, stepBack: boolean) => {
@@ -186,14 +221,6 @@ function Runner({ sessionId }: { sessionId: number }) {
     } catch (e: any) { toast(e.message, 'bad'); }
   };
 
-  const finish = useCallback(async () => {
-    setFinished(true);
-    api.post(`/sessions/${sessionId}/end`).catch(() => {});
-    invalidate('/home', '/grades', '/questions');
-  }, [sessionId]);
-
-  if (error) return <div className="p-10 text-muted">{(error as Error).message}</div>;
-  if (!queue) return null;
   if (finished || idx >= queue.length) return <Summary done={done} onFinish={finish} finished={finished} />;
 
   const q = queue[idx];
@@ -204,25 +231,19 @@ function Runner({ sessionId }: { sessionId: number }) {
       sessionId={sessionId}
       position={idx}
       total={queue.length}
+      deadline={deadline}
       onUndo={(attemptId) => undo(attemptId, false)}
       onUndoPrevious={done.length ? () => undo(done[done.length - 1].result.attempt_id, true) : undefined}
       onDone={(d) => { setDone((x) => [...x, d]); setIdx((i) => i + 1); }}
-      onSkip={() => { setQueue((qs) => [...qs!, qs![idx]]); setIdx((i) => i + 1); }}
-      onDrop={() => { setQueue((qs) => qs!.filter((_, i) => i !== idx)); }}
+      onSkip={() => { setQueue((qs) => [...qs, qs[idx]]); setIdx((i) => i + 1); }}
+      onDrop={() => { setQueue((qs) => qs.filter((_, i) => i !== idx)); }}
       onExit={() => (done.length ? finish() : nav('/'))}
     />
   );
 }
 
-function Question({
-  q, sessionId, position, total, onDone, onSkip, onDrop, onExit, onUndo, onUndoPrevious,
-}: {
-  q: PublicQuestion; sessionId: number; position: number; total: number;
-  onDone: (d: Done) => void; onSkip: () => void; onDrop: () => void; onExit: () => void;
-  onUndo: (attemptId: number) => void; onUndoPrevious?: () => void;
-}) {
-  const names = useTagNames();
-  // ---- tracking
+/** Tracks time on a question (excluding hidden-tab time), first input, answer changes and events. */
+export function useTracking() {
   const shownAt = useRef(Date.now());
   const hiddenMs = useRef(0);
   const hiddenSince = useRef<number | null>(null);
@@ -230,10 +251,11 @@ function Question({
   const changes = useRef(0);
   const events = useRef<{ t: number; kind: string; data?: unknown }[]>([]);
   const log = (kind: string, data?: unknown) => { if (events.current.length < 400) events.current.push({ t: Date.now() - shownAt.current, kind, data }); };
-  const touch = (kind = 'change', data?: unknown) => {
+  /** 'type' marks the first input only; 'change' (a discrete choice) also counts as an answer change. */
+  const touch = (kind: string, data?: unknown) => {
     if (firstInput.current === null) firstInput.current = Date.now() - shownAt.current;
-    else changes.current++;
-    log(kind, data);
+    else if (kind === 'change') changes.current++;
+    if (kind !== 'type') log(kind, data);
   };
   useEffect(() => {
     const vis = () => {
@@ -242,14 +264,22 @@ function Question({
     };
     document.addEventListener('visibilitychange', vis);
     return () => document.removeEventListener('visibilitychange', vis);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const activeMs = () => Math.max(0, Date.now() - shownAt.current - hiddenMs.current);
+  return { shownAt, firstInput, changes, events, log, touch, activeMs };
+}
 
-  // ---- answer state
-  const [choice, setChoice] = useState<number | null>(null);
-  const [choices, setChoices] = useState<number[]>([]);
-  const [tf, setTf] = useState<boolean | null>(null);
-  const [blanks, setBlanks] = useState<string[]>(() => Array(q.spec.blanks ?? 0).fill(''));
-  const [text, setText] = useState('');
+function Question({
+  q, sessionId, position, total, deadline, onDone, onSkip, onDrop, onExit, onUndo, onUndoPrevious,
+}: {
+  q: PublicQuestion; sessionId: number; position: number; total: number; deadline: number | null;
+  onDone: (d: Done) => void; onSkip: () => void; onDrop: () => void; onExit: () => void;
+  onUndo: (attemptId: number) => void; onUndoPrevious?: () => void;
+}) {
+  const names = useTagNames();
+  const tr = useTracking();
+  const [a, setA] = useState<Answer>(() => emptyAnswer(q));
   const [confidence, setConfidence] = useState<number | null>(null);
   const [hints, setHints] = useState<string[]>([]);
   const [revealed, setRevealed] = useState(false);
@@ -257,49 +287,37 @@ function Question({
   const [selfGraded, setSelfGraded] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [flagOpen, setFlagOpen] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const firstField = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
+  const [, tick] = useState(0);
+  const firstField = useRef<any>(null);
 
-  const order = useMemo(() => {
-    const n = q.spec.options?.length ?? 0;
-    return q.spec.shuffle === false ? [...Array(n).keys()] : shuffleFor(q.id, n);
-  }, [q]);
+  const set: SetAnswer = (patch, kind, data) => {
+    setA((prev) => ({ ...prev, ...patch }));
+    if (kind) tr.touch(kind, data);
+  };
 
   useEffect(() => {
-    if (result) return;
-    const t = setInterval(() => setElapsed(Date.now() - shownAt.current - hiddenMs.current), 1000);
+    if (result && !deadline) return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(t);
-  }, [result]);
+  }, [result, deadline]);
 
   useEffect(() => {
-    if (['fill_blank', 'numeric', 'short_answer'].includes(q.type)) setTimeout(() => firstField.current?.focus(), 0);
+    if (TEXT_TYPES.has(q.type)) setTimeout(() => firstField.current?.focus(), 0);
   }, [q]);
 
-  const hasAnswer =
-    q.type === 'mcq_single' ? choice !== null :
-    q.type === 'mcq_multi' ? choices.length > 0 :
-    q.type === 'true_false' ? tf !== null :
-    q.type === 'fill_blank' ? blanks.some((b) => b.trim()) :
-    q.type === 'numeric' ? text.trim() !== '' :
-    q.type === 'short_answer' ? text.trim() !== '' : revealed;
+  const ready = hasAnswer(q, a);
+  const selfGradable = (q.type === 'short_answer' || (q.type === 'code' && !q.spec.auto)) && result?.grade_status === 'pending';
 
   const submit = async (extra: { self_rating?: number } = {}) => {
     if (busy || result) return;
-    if (!hasAnswer && q.type !== 'flashcard') return;
+    if (!ready && q.type !== 'flashcard') return;
     setBusy(true);
-    const response =
-      q.type === 'mcq_single' ? { choice } :
-      q.type === 'mcq_multi' ? { choices } :
-      q.type === 'true_false' ? { value: tf } :
-      q.type === 'fill_blank' ? { blanks } :
-      q.type === 'numeric' ? { value: text } :
-      q.type === 'short_answer' ? { text } : {};
-    const time_ms = Math.max(0, Date.now() - shownAt.current - hiddenMs.current);
+    const time_ms = tr.activeMs();
     try {
       const r = await api.post<SubmitResult>('/attempts', {
-        session_id: sessionId, question_id: q.id, response, shown_at: shownAt.current, time_ms,
-        first_input_ms: firstInput.current, answer_changes: changes.current, hints_used: hints.length,
-        confidence, events: events.current, ...extra,
+        session_id: sessionId, question_id: q.id, response: toResponse(q, a), shown_at: tr.shownAt.current, time_ms,
+        first_input_ms: tr.firstInput.current, answer_changes: tr.changes.current, hints_used: hints.length,
+        confidence, events: tr.events.current, ...extra,
       });
       setResult(r);
       if (r.leech) toast('You keep missing this one, so it is set aside. Rewrite or split it from the library.', 'neutral', { label: 'Edit', run: () => window.open(`/library/${q.id}`, '_blank') });
@@ -314,7 +332,7 @@ function Question({
 
   const next = () => {
     if (!result) return;
-    onDone({ q, result: selfGraded !== null ? { ...result, score: selfGraded, grade_status: 'self' } : result, time_ms: Date.now() - shownAt.current - hiddenMs.current });
+    onDone({ q, result: selfGraded !== null ? { ...result, score: selfGraded, grade_status: 'self' } : result, time_ms: tr.activeMs() });
   };
 
   const selfGrade = async (score: number) => {
@@ -329,25 +347,17 @@ function Question({
     if (result || hints.length >= q.hints) return;
     const r = await api.get<{ hint: string }>(`/questions/${q.id}/hint/${hints.length}`);
     setHints((h) => [...h, r.hint]);
-    log('hint', hints.length);
+    tr.log('hint', hints.length);
   };
 
-  const pick = (displayIdx: number) => {
-    if (result || displayIdx >= order.length) return;
-    const orig = order[displayIdx];
-    if (q.type === 'mcq_single') { setChoice(orig); touch('change', orig); }
-    else { setChoices((c) => (c.includes(orig) ? c.filter((x) => x !== orig) : [...c, orig])); touch('change', orig); }
-  };
-
-  const setConf = (v: number) => { if (!result && q.type !== 'flashcard') { setConfidence((c) => (c === v ? null : v)); log('confidence', v); } };
-
-  const reveal = () => { if (!revealed) { setRevealed(true); touch('reveal'); } };
+  const setConf = (v: number) => { if (!result && q.type !== 'flashcard') { setConfidence((c) => (c === v ? null : v)); tr.log('confidence', v); } };
+  const reveal = () => { if (!revealed) { setRevealed(true); tr.touch('reveal'); } };
 
   const keys: Record<string, (e: KeyboardEvent) => unknown> = {
     Escape: () => { if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur(); else onExit(); },
     Enter: () => {
       if (result) { if (q.type !== 'flashcard') next(); return; }
-      if (q.type === 'short_answer') return false; // newline; Ctrl+Enter submits
+      if (MULTILINE.has(q.type)) return false; // newline; Ctrl+Enter submits
       if (q.type === 'flashcard') { reveal(); return; }
       submit();
     },
@@ -360,34 +370,26 @@ function Question({
     h: hint, 'alt+h': hint,
     x: () => setFlagOpen(true),
     s: () => { if (!result) onSkip(); },
-    e: () => { window.open(`/library/${q.id}`, '_blank'); },
+    o: () => { window.open(`/library/${q.id}`, '_blank'); },
     z: () => {
       if (result) onUndo(result.attempt_id);
-      else if (firstInput.current === null && onUndoPrevious) onUndoPrevious();
+      else if (tr.firstInput.current === null && onUndoPrevious) onUndoPrevious();
       else return false;
     },
   };
   for (const c of CONF) { keys[c.key] = () => setConf(c.v); keys[`alt+${c.v}`] = () => setConf(c.v); }
-  for (let i = 1; i <= 9; i++) {
+  for (let i = 1; i <= 4; i++)
     keys[String(i)] = () => {
-      if (q.type === 'mcq_single' || q.type === 'mcq_multi') pick(i - 1);
-      else if (q.type === 'true_false' && i <= 2 && !result) { setTf(i === 1); touch('change', i === 1); }
-      else if (q.type === 'flashcard' && revealed && !result && i <= 4) submit({ self_rating: i });
-      else if (q.type === 'short_answer' && result?.grade_status === 'pending' && i <= 4) selfGrade(SELF[i - 1].score);
+      if (q.type === 'flashcard' && revealed && !result) submit({ self_rating: i });
+      else if (selfGradable && selfGraded === null) selfGrade(SELF[i - 1].score);
       else return false;
     };
-  }
-  if (q.type === 'true_false') {
-    keys.t = () => { if (!result) { setTf(true); touch('change', true); } };
-    keys.f = () => { if (!result) { setTf(false); touch('change', false); } };
-  }
+  Object.assign(keys, answerKeys(q, a, set, !!result));
   useKeys(keys, { enabled: !flagOpen, allowInInput: ['Escape', 'Enter'] });
 
-  const correctSet: Set<number> = result
-    ? new Set(q.type === 'mcq_single' ? [result.answer.correct] : q.type === 'mcq_multi' ? result.answer.correct : [])
-    : new Set();
-  const chosenSet = new Set(q.type === 'mcq_single' ? (choice !== null ? [choice] : []) : choices);
   const progress = (position / total) * 100;
+  const elapsed = tr.activeMs();
+  const remaining = deadline ? deadline - Date.now() : null;
 
   return (
     <div className="min-h-full flex flex-col">
@@ -395,7 +397,9 @@ function Question({
       <header className="flex items-center justify-between px-6 h-12 text-[12.5px] text-muted">
         <button onClick={onExit} className="hover:text-text flex items-center gap-2"><Kbd>Esc</Kbd> End</button>
         <div className="tabular-nums">{position + 1} / {total}</div>
-        <div className="tabular-nums w-16 text-right">{elapsed < 60_000 ? `${Math.floor(elapsed / 1000)}s` : fmtMs(Math.floor(elapsed / 1000) * 1000)}</div>
+        <div className={`tabular-nums w-16 text-right ${remaining !== null && remaining < 60_000 ? 'text-bad' : ''}`} title={remaining !== null ? 'Time left in session' : 'Time on this question'}>
+          {remaining !== null ? clock(remaining) : elapsed < 60_000 ? `${Math.floor(elapsed / 1000)}s` : fmtMs(Math.floor(elapsed / 1000) * 1000)}
+        </div>
       </header>
 
       <div className="flex-1 w-full max-w-[720px] mx-auto px-6 max-sm:px-4 pt-[6vh] pb-24 fade-in">
@@ -406,105 +410,10 @@ function Question({
           <span className="ml-auto">difficulty {q.difficulty}</span>
         </div>
 
-        <Md src={q.type === 'fill_blank' ? numberBlanks(q.prompt) : q.prompt} className="text-[17px] leading-[1.65]" />
+        <Md src={q.type === 'fill_blank' || q.type === 'cloze' ? numberBlanks(q.prompt) : q.prompt} className="text-[17px] leading-[1.65]" />
 
         <div className="mt-7">
-          {(q.type === 'mcq_single' || q.type === 'mcq_multi') && (
-            <div className="flex flex-col gap-2">
-              {q.type === 'mcq_multi' && !result && <div className="text-[12.5px] text-faint mb-1">Select {q.spec.count === 1 ? 'one' : `all that apply (${q.spec.count})`}</div>}
-              {order.map((orig, i) => {
-                const chosen = chosenSet.has(orig);
-                const right = correctSet.has(orig);
-                const tone = result ? (right ? 'border-good/60 bg-good-soft' : chosen ? 'border-bad/60 bg-bad-soft' : 'border-line opacity-60') : chosen ? 'border-accent/70 bg-accent-soft' : 'border-line hover:border-line-strong hover:bg-hover';
-                return (
-                  <button key={orig} onClick={() => pick(i)} disabled={!!result} className={`flex items-start gap-3 text-left rounded-xl border px-4 py-3 transition-colors duration-100 ${tone}`}>
-                    <Kbd className="mt-[3px] shrink-0">{i + 1}</Kbd>
-                    <Md src={q.spec.options[orig]} className="flex-1" />
-                    {result && right && <span className="text-good text-[12px] mt-0.5">correct</span>}
-                    {result && chosen && !right && <span className="text-bad text-[12px] mt-0.5">your answer</span>}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {q.type === 'true_false' && (
-            <div className="grid grid-cols-2 gap-3">
-              {[true, false].map((v, i) => {
-                const right = result && result.answer.correct === v;
-                const chosen = tf === v;
-                const tone = result ? (right ? 'border-good/60 bg-good-soft' : chosen ? 'border-bad/60 bg-bad-soft' : 'border-line opacity-60') : chosen ? 'border-accent/70 bg-accent-soft' : 'border-line hover:border-line-strong hover:bg-hover';
-                return (
-                  <button key={String(v)} disabled={!!result} onClick={() => { setTf(v); touch('change', v); }} className={`h-14 rounded-xl border flex items-center justify-center gap-3 text-[15px] transition-colors ${tone}`}>
-                    <Kbd>{i + 1}</Kbd> {v ? 'True' : 'False'} <span className="text-faint text-[12px]">({v ? 't' : 'f'})</span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {q.type === 'fill_blank' && (
-            <div className="flex flex-col gap-2.5">
-              {blanks.map((b, i) => {
-                const ok = result?.detail?.blanks?.[i];
-                return (
-                  <div key={i} className="flex items-center gap-3">
-                    <span className="w-5 text-right text-faint tabular-nums text-[13px]">{i + 1}</span>
-                    <input
-                      ref={i === 0 ? firstField : undefined}
-                      value={b}
-                      disabled={!!result}
-                      onChange={(e) => { const v = [...blanks]; v[i] = e.target.value; setBlanks(v); if (firstInput.current === null) touch(); }}
-                      onBlur={() => log('change', i)}
-                      className={`field max-w-sm ${result ? (ok ? 'border-good/60' : 'border-bad/60') : ''}`}
-                    />
-                    {result && !ok && <span className="text-[13px] text-muted">→ <span className="text-text">{result.detail.accept[i]}</span></span>}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {q.type === 'numeric' && (
-            <div className="flex items-center gap-3">
-              <input
-                ref={firstField}
-                value={text}
-                disabled={!!result}
-                inputMode="decimal"
-                placeholder="Your answer"
-                onChange={(e) => { setText(e.target.value); if (firstInput.current === null) touch(); }}
-                onBlur={() => log('change')}
-                className={`field max-w-[240px] font-mono ${result ? (result.correct ? 'border-good/60' : 'border-bad/60') : ''}`}
-              />
-              {q.spec.unit && <span className="text-muted">{q.spec.unit}</span>}
-              {result && !result.correct && <span className="text-[13px] text-muted">→ <span className="text-text font-mono">{result.answer.answer}</span>{result.answer.tolerance ? <span className="text-faint"> (±{result.answer.relative ? `${result.answer.tolerance * 100}%` : result.answer.tolerance})</span> : null}</span>}
-            </div>
-          )}
-
-          {q.type === 'short_answer' && (
-            <div>
-              <textarea
-                ref={firstField}
-                value={text}
-                disabled={!!result}
-                rows={q.spec.long ? 12 : 5}
-                placeholder="Write your answer…  (Ctrl+Enter to submit)"
-                onChange={(e) => { setText(e.target.value); if (firstInput.current === null) touch(); }}
-                onBlur={() => log('change')}
-                className="field text-[14.5px]"
-              />
-              {!result && q.spec.rubric?.length > 0 && (
-                <div className="mt-2 text-[12.5px] text-faint">Graded on: {q.spec.rubric.map((r: any) => `${r.criterion} (${r.points})`).join(' · ')}</div>
-              )}
-            </div>
-          )}
-
-          {q.type === 'flashcard' && (
-            revealed ? (
-              <div className="border-t border-line pt-6 fade-in"><Md src={q.spec.back} /></div>
-            ) : null
-          )}
+          <AnswerInput q={q} a={a} set={set} result={result} firstField={firstField} revealed={revealed} />
         </div>
 
         {hints.length > 0 && (
@@ -538,7 +447,7 @@ function Question({
               <Button key={f.r} variant={f.r === 3 ? 'primary' : 'secondary'} onClick={() => submit({ self_rating: f.r })} kbd={String(f.r)}>{f.label}</Button>
             ))}
             {!result && q.type !== 'flashcard' && (
-              <Button variant="primary" onClick={() => submit()} disabled={!hasAnswer || busy} kbd={q.type === 'short_answer' ? 'Ctrl ↵' : '↵'}>Check</Button>
+              <Button variant="primary" onClick={() => submit()} disabled={!ready || busy} kbd={MULTILINE.has(q.type) ? 'Ctrl ↵' : '↵'}>{busy && q.type === 'code' ? 'Running…' : 'Check'}</Button>
             )}
             {result && q.type !== 'flashcard' && <Button variant="ghost" size="sm" onClick={() => onUndo(result.attempt_id)} kbd="z">Undo</Button>}
             {result && q.type !== 'flashcard' && <Button variant="primary" onClick={next} kbd="↵">{position + 1 === total ? 'Finish' : 'Next'}</Button>}
@@ -556,32 +465,35 @@ function Question({
   );
 }
 
-function Feedback({ q, result, selfGraded, onSelfGrade }: { q: PublicQuestion; result: SubmitResult; selfGraded: number | null; onSelfGrade: (s: number) => void }) {
+/** Verdict, model answer / reference solution with self-grading, and explanation. */
+export function Feedback({ q, result, selfGraded, onSelfGrade, showDue = true }: { q: PublicQuestion; result: SubmitResult; selfGraded: number | null; onSelfGrade?: (s: number) => void; showDue?: boolean }) {
   const pending = result.grade_status === 'pending';
-  const verdict = pending ? null : result.correct ? 'Correct' : (result.score ?? 0) > 0 ? `Partly correct · ${pct(result.score)}` : 'Incorrect';
+  const score = selfGraded ?? result.score;
+  const verdict = pending && selfGraded === null ? null : (score ?? 0) >= 1 || result.correct ? 'Correct' : (score ?? 0) > 0 ? `Partly correct · ${pct(score)}` : 'Incorrect';
+  const reference = q.type === 'short_answer' ? result.answer.model_answer : q.type === 'code' && !q.spec.auto ? result.answer.reference_solution : null;
   return (
     <div className="mt-8 fade-in">
       {verdict && (
-        <div className={`text-[13px] font-medium ${result.correct ? 'text-good' : 'text-bad'}`}>
+        <div className={`text-[13px] font-medium ${verdict === 'Correct' ? 'text-good' : 'text-bad'}`}>
           {verdict}
-          {result.next_due && <span className="text-faint font-normal"> · next review in {fmtDue(result.next_due)}</span>}
+          {showDue && result.next_due && <span className="text-faint font-normal"> · next review in {fmtDue(result.next_due)}</span>}
         </div>
       )}
-      {q.type === 'short_answer' && (
+      {reference && (
         <Card className="mt-3 p-4">
-          <div className="text-[12px] text-faint mb-1.5">Model answer</div>
-          <Md src={result.answer.model_answer} />
+          <div className="text-[12px] text-faint mb-1.5">{q.type === 'code' ? 'Reference solution' : 'Model answer'}</div>
+          <Md src={q.type === 'code' ? '```' + q.spec.language + '\n' + reference + '\n```' : reference} />
           {result.answer.rubric?.length > 0 && (
             <ul className="mt-3 text-[13px] text-muted space-y-0.5">
               {result.answer.rubric.map((r: any, i: number) => <li key={i}>· {r.criterion} <span className="text-faint">({r.points})</span></li>)}
             </ul>
           )}
-          {pending && (
+          {pending && onSelfGrade && (
             <div className="mt-4 pt-4 border-t border-line">
               {selfGraded === null ? (
                 <>
-                  <div className="text-[12.5px] text-muted mb-2">Grade yourself, or press Enter to leave it for your AI agent to grade.</div>
-                  <div className="flex gap-1.5">
+                  <div className="text-[12.5px] text-muted mb-2">Grade yourself, or move on and leave it for your AI agent to grade.</div>
+                  <div className="flex gap-1.5 flex-wrap">
                     {SELF.map((s, i) => <Button key={s.label} size="sm" onClick={() => onSelfGrade(s.score)} kbd={String(i + 1)}>{s.label}</Button>)}
                   </div>
                 </>
@@ -601,6 +513,7 @@ function Feedback({ q, result, selfGraded, onSelfGrade }: { q: PublicQuestion; r
     </div>
   );
 }
+
 
 function FlagDialog({ open, onClose, onFlag }: { open: boolean; onClose: () => void; onFlag: (reason: string) => void }) {
   const [reason, setReason] = useState('');
@@ -640,7 +553,7 @@ function Summary({ done, onFinish, finished }: { done: Done[]; onFinish: () => v
           <Card>
             {missed.map((d, i) => (
               <div key={i} className={`px-4 py-3 ${i ? 'border-t border-line' : ''}`}>
-                <Md src={d.q.prompt.replace(/\{\{\s*blank\s*\}\}/g, '___')} className="text-[13.5px] line-clamp-2" />
+                <MdLine src={d.q.prompt} className="text-[13.5px]" />
               </div>
             ))}
           </Card>

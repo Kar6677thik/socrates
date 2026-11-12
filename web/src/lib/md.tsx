@@ -91,10 +91,25 @@ export function plain(src: string, max = 180): string {
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/[*_`#>]/g, '')
     .replace(/\{\{\s*blank\s*\}\}/g, '___')
+    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, x: string) => `[${x.split('|')[0]}]`)
     .replace(/\s+/g, ' ')
     .trim();
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
+
+/** One-line markdown preview: math and inline formatting render; code blocks and images become placeholders. */
+export const MdLine = memo(function MdLine({ src, className = '' }: { src: string; className?: string }) {
+  const line = src
+    .replace(/```[\s\S]*?```/g, ' `[code]` ')
+    .replace(/\$\$([\s\S]*?)\$\$/g, (_m, x: string) => `$${x.trim()}$`)
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' [image] ')
+    .replace(/\{\{\s*blank\s*\}\}/g, '___')
+    .replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, (_m, x: string) => `[${x.split('|')[0]}]`)
+    .replace(/^#+\s*/gm, '')
+    .replace(/\s*\n+\s*/g, ' ')
+    .trim();
+  return <div className={`md md-line ${className}`} dangerouslySetInnerHTML={{ __html: renderMd(line) }} />;
+});
 
 export const Md = memo(function Md({ src, className = '', inline = false }: { src: string; className?: string; inline?: boolean }) {
   return <div className={`md ${inline ? 'md-inline' : ''} ${className}`} dangerouslySetInnerHTML={{ __html: renderMd(src) }} />;
