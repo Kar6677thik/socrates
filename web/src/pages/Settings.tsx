@@ -4,7 +4,15 @@ import { api, useApi, invalidate, ago } from '../lib/api';
 import { Button, Card, Field, PageHeader, CopyBox, Segmented, Badge, toast } from '../components/ui';
 
 interface S { new_per_day: number; reviews_per_day: number; retention: number; agent_drafts: boolean }
-interface Mcp { token: string; http_url: string; path_token_url: string; stdio_command: { command: string; args: string[] }; claude_code: string }
+interface Mcp {
+  mode: 'local' | 'oauth' | 'off';
+  stdio_command: { command: string; args: string[] };
+  claude_code: string;
+  // local
+  token?: string; http_url?: string; path_token_url?: string;
+  // oauth (deployed, Orbit Identity)
+  oauth_url?: string;
+}
 
 export default function Settings() {
   const { data } = useApi<S>('/settings');
@@ -29,17 +37,53 @@ export default function Settings() {
 
       <h2 className="font-medium mb-1">Connect an AI agent</h2>
       <p className="text-muted text-[13px] mb-4">The agent can add and edit questions, grade written answers and read your performance to target weak spots. Every change shows up in Agent activity.</p>
-      <Segmented
-        value={client}
-        onChange={setClient}
-        options={[
-          { value: 'claude-code', label: 'Claude Code' },
-          { value: 'claude-desktop', label: 'Claude Desktop' },
-          { value: 'chatgpt', label: 'ChatGPT' },
-          { value: 'other', label: 'Other (HTTP)' },
-        ]}
-      />
-      {mcp && (
+      {mcp && mcp.mode !== 'off' && (
+        <Segmented
+          value={client}
+          onChange={setClient}
+          options={[
+            { value: 'claude-code', label: 'Claude Code' },
+            { value: 'claude-desktop', label: 'Claude Desktop' },
+            { value: 'chatgpt', label: 'ChatGPT' },
+            { value: 'other', label: 'Other (HTTP)' },
+          ]}
+        />
+      )}
+      {mcp?.mode === 'off' && (
+        <Card className="p-5 mt-3 text-[13px] text-muted">
+          Agent access isn’t set up on this server yet. It uses Orbit Identity sign-in; see <code className="font-mono">docs/DEPLOY.md</code>.
+        </Card>
+      )}
+      {mcp?.mode === 'oauth' && (
+        <Card className="p-5 mt-3 space-y-4 text-[13px]">
+          {client === 'claude-code' && (
+            <>
+              <p className="text-muted">Run once, then run <code className="font-mono">/mcp</code> in Claude Code and choose Authenticate.</p>
+              <CopyBox text={mcp.claude_code} />
+            </>
+          )}
+          {client === 'claude-desktop' && (
+            <>
+              <p className="text-muted">Settings → Connectors → Add custom connector, with this URL. Connectors added on claude.ai also show up in Claude Desktop.</p>
+              <CopyBox text={mcp.oauth_url!} />
+            </>
+          )}
+          {client === 'chatgpt' && (
+            <>
+              <p className="text-muted">Settings → Connectors → Developer mode → Create. Choose OAuth and use this URL.</p>
+              <CopyBox text={mcp.oauth_url!} />
+            </>
+          )}
+          {client === 'other' && (
+            <>
+              <p className="text-muted">Streamable HTTP with OAuth 2.1. Clients discover the authorization server from the 401 response.</p>
+              <CopyBox label="URL" text={mcp.oauth_url!} />
+            </>
+          )}
+          <p className="text-faint text-[12px]">You approve each app with Orbit Identity from a device on your tailnet. Read access lets an agent see questions and results; write access lets it add, edit and grade. Revoke apps in Orbit → Identity.</p>
+        </Card>
+      )}
+      {mcp?.mode === 'local' && (
         <Card className="p-5 mt-3 space-y-4 text-[13px]">
           {client === 'claude-code' && (
             <>
@@ -58,14 +102,14 @@ export default function Settings() {
               <p className="text-muted">ChatGPT needs a public HTTPS address. Keep Socrates running (<code className="font-mono">npm start</code>) and open a tunnel:</p>
               <CopyBox text="cloudflared tunnel --url http://localhost:4321" />
               <p className="text-muted">Then in ChatGPT: Settings → Connectors → Developer mode → Create, choose “No authentication”, and use this URL with your tunnel’s host in place of <code className="font-mono">localhost:4321</code>:</p>
-              <CopyBox text={mcp.path_token_url.replace('http://localhost:4321', 'https://YOUR-TUNNEL.trycloudflare.com')} />
+              <CopyBox text={mcp.path_token_url!.replace('http://localhost:4321', 'https://YOUR-TUNNEL.trycloudflare.com')} />
               <p className="text-faint text-[12px]">The token in the URL is the password. Only the MCP endpoint is reachable through the tunnel; the app itself stays local.</p>
             </>
           )}
           {client === 'other' && (
             <>
               <p className="text-muted">Streamable HTTP endpoint. Send the token as a bearer header.</p>
-              <CopyBox label="URL" text={mcp.http_url} />
+              <CopyBox label="URL" text={mcp.http_url!} />
               <CopyBox label="Header" text={`Authorization: Bearer ${mcp.token}`} />
             </>
           )}

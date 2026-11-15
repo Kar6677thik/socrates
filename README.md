@@ -22,6 +22,10 @@ Data lives in `data/socrates.db` (SQLite). Daily backups go to `data/backups/` (
 
 The UI is installable as an app (Chrome/Edge: the install icon in the address bar) and keeps working from cache if the server is briefly down.
 
+## Deploy
+
+`docs/DEPLOY.md` runs Socrates on a k3s server: the UI on your tailnet behind a password + authenticator login, and the MCP endpoint public behind Orbit Identity OAuth. `Dockerfile` and `deploy/` hold the image and manifests. Locally nothing changes: no login, localhost only.
+
 ## Import
 
 Library → *Import*, or drop a file on the Import page. You see every question and tag before anything is added.
@@ -66,7 +70,7 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 
 Multiple choice (single and multiple answer), true/false, fill in the blank, cloze (`{{c1::answer}}`), numeric (tolerance, units), matching (with distractors), ordering (partial credit by pairwise order), written answer and essay (rubric, graded by you or your agent), code, image hotspot, and flashcards. Prompts take markdown, LaTeX, code blocks and images; paste or drop an image into the editor to upload it.
 
-**Code:** JavaScript questions with tests are graded automatically. Your code runs in an isolated worker with a time limit and no access to files, the network or the host process; hidden tests only report pass or fail. Other languages are graded against a reference solution by you or your agent.
+**Code:** JavaScript questions with tests are graded automatically. Your code runs in a separate Node process with the permission model on (no file access, child processes or workers), an empty environment, a memory cap and a time limit; hidden tests only report pass or fail. Node before v25 doesn't block network access from that process, so a deployment should block egress (the provided manifests do). Other languages are graded against a reference solution by you or your agent.
 
 **Images** are stored in `data/media/` under their content hash. PNG, JPEG, GIF, WebP and AVIF only: SVG is refused because it can carry scripts. When the agent passes a URL, the server only downloads public https addresses, never private or local ones.
 

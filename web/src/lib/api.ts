@@ -19,9 +19,13 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
+  // Session expired (deployed instance): drop back to the sign-in screen.
+  if (r.status === 401 && data.code === 'signin') qc.setQueryData<Session>(['/session'], { signedIn: false, loginRequired: true });
   if (!r.ok) throw new ApiError(data.error ?? r.statusText, data.details);
   return data as T;
 }
+
+export interface Session { signedIn: boolean; loginRequired: boolean }
 
 export const api = {
   get: <T,>(url: string) => req<T>('GET', url),

@@ -1,0 +1,69 @@
+# Restore from the restic repository (docs/DEPLOY.md, "Restore"). Adapted from Sprawl's deploy/api/restore.yaml.
+# Run ONLY with the app scaled to zero:
+#   kubectl -n socrates scale deploy/socrates --replicas=0 && kubectl -n socrates wait --for=delete pod -l app=socrates --timeout=120s
+#   kubectl apply -f deploy/restore.yaml && kubectl -n socrates wait --for=condition=complete job/socrates-restore --timeout=600s
+#   kubectl -n socrates logs job/socrates-restore && kubectl -n socrates delete job socrates-restore
+#   kubectl -n socrates scale deploy/socrates --replicas=1
+# By default it restores the newest daily copy in the latest snapshot. Set BACKUP_FILE (e.g. socrates-2026-11-12.db)
+# for another one. The current database is never deleted: it is moved to /data/pre-restore/ first. Missing images
+# are copied back into /data/media; existing ones are left alone (names are content hashes).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: socrates-restore
+  namespace: socrates
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      # Same label as the backup job, so its NetworkPolicy (DNS + HTTPS egress) applies.
+      labels: { app: socrates-backup }
+    spec:
+      restartPolicy: Never
+      serviceAccountName: socrates
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: restic
+          image: restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              restic restore latest --tag socrates --target /tmp/restore
+              if [ -n "${BACKUP_FILE:-}" ]; then source="/tmp/restore/data/backups/$BACKUP_FILE"; else source="$(ls /tmp/restore/data/backups/socrates-????-??-??.db | sort | tail -1)"; fi
+              test -s "$source" || { echo "no such backup copy: $source"; exit 1; }
+              stamp="$(date -u +%Y%m%d-%H%M%S)"
+              mkdir -p /data/pre-restore
+              for f in socrates.db socrates.db-wal socrates.db-shm; do if [ -f "/data/$f" ]; then mv "/data/$f" "/data/pre-restore/$f.$stamp"; fi; done
+              cp "$source" /data/socrates.db
+              if [ -d /tmp/restore/data/media ]; then mkdir -p /data/media && cp -n /tmp/restore/data/media/* /data/media/ 2>/dev/null || true; fi
+              echo "restored $(basename "$source"); previous database kept in /data/pre-restore/*.$stamp"
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: RESTIC_CACHE_DIR, value: /tmp/restic-cache }
+            - { name: BACKUP_FILE, value: "" }
+          envFrom:
+            - secretRef: { name: socrates-backup }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: temporary, mountPath: /tmp }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: socrates-data }
+        - name: temporary
+          emptyDir: { sizeLimit: 1Gi }

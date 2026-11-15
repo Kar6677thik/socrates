@@ -24,6 +24,8 @@ function load(): Promise<Extractor | null> {
     try {
       const { pipeline, env } = await import('@huggingface/transformers');
       env.cacheDir = process.env.SOCRATES_MODELS ?? join(DATA_DIR, 'models');
+      // Containers ship the model in the image and have no network: never try to download.
+      if (process.env.SOCRATES_MODELS_OFFLINE === '1') env.allowRemoteModels = false;
       return (await pipeline('feature-extraction', MODEL, { dtype: 'q8' })) as unknown as Extractor;
     } catch (e: any) {
       failed = true;

@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { mkdirSync, existsSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export type DB = DatabaseSync;
@@ -212,15 +212,38 @@ export function tx<T>(db: DB, fn: () => T): T {
   }
 }
 
-/** Snapshot the DB into data/backups using VACUUM INTO. Keeps the newest 14 daily files. */
+/**
+ * Snapshot the DB into data/backups using VACUUM INTO, check the copy with PRAGMA integrity_check, and record
+ * the outcome in backups/backup-status.json (the off-node backup job ships copies only after a success).
+ * Keeps the newest 14 daily files. A copy that fails the check is deleted and the error rethrown.
+ */
 export function backup(db: DB, dbPath = DEFAULT_DB_PATH, label?: string): string | null {
   if (dbPath === ':memory:') return null;
   const dir = join(dirname(dbPath), 'backups');
   mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().slice(0, 10);
   const file = join(dir, `socrates-${stamp}${label ? '-' + label : ''}.db`);
-  if (existsSync(file)) unlinkSync(file);
-  db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+  const status = (state: 'Succeeded' | 'Failed', extra: Record<string, unknown>) =>
+    writeFileSync(join(dir, 'backup-status.json'), JSON.stringify({ state, at: new Date().toISOString(), ...extra }));
+  try {
+    if (existsSync(file)) unlinkSync(file);
+    db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+    const copy = new DatabaseSync(file, { readOnly: true });
+    let check: string;
+    try {
+      check = (copy.prepare('PRAGMA integrity_check').all() as { integrity_check: string }[]).map((r) => r.integrity_check).join('; ');
+    } finally {
+      copy.close();
+    }
+    if (check !== 'ok') {
+      unlinkSync(file);
+      throw new Error(`Backup copy failed its integrity check: ${check.slice(0, 500)}`);
+    }
+    status('Succeeded', { file: basename(file), bytes: statSync(file).size });
+  } catch (e: any) {
+    try { status('Failed', { error: String(e?.message ?? e).slice(0, 500) }); } catch {}
+    throw e;
+  }
   const daily = readdirSync(dir)
     .filter((f) => /^socrates-\d{4}-\d{2}-\d{2}\.db$/.test(f))
     .sort()

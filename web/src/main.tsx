@@ -3,12 +3,13 @@ import { createRoot } from 'react-dom/client';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Route, Switch, Link, useLocation } from 'wouter';
 import './styles.css';
-import { qc, useApi, type Home } from './lib/api';
+import { api, qc, useApi, type Home, type Session } from './lib/api';
 import { isTyping } from './lib/keys';
 import { Toaster, Kbd, Modal } from './components/ui';
 import { Palette } from './components/Palette';
 import HomePage from './pages/Home';
 import StudyPage from './pages/Study';
+import SignIn from './pages/SignIn';
 
 const Library = lazy(() => import('./pages/Library'));
 const Editor = lazy(() => import('./pages/Editor'));
@@ -44,6 +45,12 @@ function useTheme() {
 function Shell({ children }: { children: ReactNode }) {
   const [loc, nav] = useLocation();
   const { data: home } = useApi<Home>('/home', { refetchInterval: 30_000 });
+  const { data: session } = useApi<Session>('/session');
+  const signOut = async () => {
+    await api.del('/session').catch(() => {});
+    qc.clear();
+    qc.setQueryData<Session>(['/session'], { signedIn: false, loginRequired: true });
+  };
   const [theme, toggleTheme] = useTheme();
   const [help, setHelp] = useState(false);
   const [palette, setPalette] = useState(false);
@@ -103,7 +110,10 @@ function Shell({ children }: { children: ReactNode }) {
         </nav>
         <div className="mt-auto flex items-center justify-between px-2 text-faint text-[12px]">
           <button onClick={() => setHelp(true)} className="hover:text-text">Shortcuts <Kbd>?</Kbd></button>
-          <button onClick={toggleTheme} className="hover:text-text" title="Toggle theme (\)">{theme === 'dark' ? 'Light' : 'Dark'}</button>
+          <span className="flex gap-3">
+            {session?.loginRequired && <button onClick={signOut} className="hover:text-text">Sign out</button>}
+            <button onClick={toggleTheme} className="hover:text-text" title="Toggle theme (\)">{theme === 'dark' ? 'Light' : 'Dark'}</button>
+          </span>
         </div>
       </aside>
       <main className="flex-1 min-w-0 overflow-y-auto">
@@ -148,7 +158,15 @@ function Shell({ children }: { children: ReactNode }) {
   );
 }
 
+/** Deployed instances need the owner signed in; locally loginRequired is false and this renders straight through. */
 function App() {
+  const { data: session, isError } = useApi<Session>('/session');
+  if (!session && !isError) return null;
+  if (session?.loginRequired && !session.signedIn) return <SignIn />;
+  return <Routes />;
+}
+
+function Routes() {
   return (
     <Shell>
       <Suspense fallback={null}>

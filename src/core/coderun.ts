@@ -1,10 +1,18 @@
-import { Worker } from 'node:worker_threads';
+import { spawn } from 'node:child_process';
 
 /**
- * Runs a JavaScript answer against test cases in a worker thread, inside a fresh VM context
- * (no require, process, fs or network), with a per-test timeout, a hard kill and a memory cap.
- * This guards against mistakes like infinite loops, not against hostile code: it only ever runs
- * code you typed into your own app.
+ * Runs a JavaScript answer against test cases in a separate Node process.
+ *
+ * The VM context only keeps honest code tidy (no `require` or `process` in scope); it is not a
+ * security boundary, since one line escapes it. The boundary is the child process:
+ * - Node's permission model with nothing granted: no file reads or writes, no child processes,
+ *   no workers, no native addons;
+ * - an empty environment, so none of the server's settings or secrets;
+ * - a 64 MB heap, a per-test timeout and a hard kill after 5 s;
+ * - at most two runs at a time.
+ * Network access is not covered by the permission model before Node 25, so deployments must also
+ * block egress (the Kubernetes NetworkPolicy does).
+ * Code can reach this runner from an AI agent over MCP, so treat it as hostile.
  */
 
 export interface TestCase { args: unknown[]; expected: unknown; hidden?: boolean }
@@ -12,9 +20,12 @@ export interface TestResult { pass: boolean; hidden?: boolean; args?: unknown[];
 export interface RunResult { results: TestResult[]; passed: number; total: number; error?: string; logs: string[] }
 
 const WORKER = `
-const { parentPort, workerData } = require('node:worker_threads');
 const vm = require('node:vm');
-const { code, fn, tests } = workerData;
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => { input += d; });
+process.stdin.on('end', () => {
+const { code, fn, tests } = JSON.parse(input);
 const logs = [];
 const fmt = (v) => {
   if (typeof v === 'number' && !Number.isFinite(v)) return String(v);
@@ -50,25 +61,73 @@ const results = tests.map((t) => {
     return { pass: false, hidden: t.hidden, error: String(e && e.message || e).slice(0, 300), ms: Math.round(performance.now() - start) };
   }
 });
-parentPort.postMessage({ results, logs, error: setupError });
+process.stdout.write(JSON.stringify({ results, logs, error: setupError }));
+});
 `;
 
+const MAX_PARALLEL = 2;
+const MAX_OUTPUT = 4 * 1024 * 1024;
+let running = 0;
+const waiting: (() => void)[] = [];
+
+async function slot<T>(fn: () => Promise<T>): Promise<T> {
+  if (running >= MAX_PARALLEL) await new Promise<void>((r) => waiting.push(r));
+  running++;
+  try {
+    return await fn();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
 export function runJs(code: string, tests: TestCase[], fn = 'solution'): Promise<RunResult> {
+  if (!Array.isArray(tests) || tests.length > 200) return Promise.resolve({ results: [], passed: 0, total: 0, error: 'Too many tests (200 at most)', logs: [] });
+  if (code.length > 100_000) return Promise.resolve({ results: [], passed: 0, total: tests.length, error: 'Code is too long (100 KB at most)', logs: [] });
   if (!/^[A-Za-z_$][\w$]*$/.test(fn)) return Promise.resolve({ results: [], passed: 0, total: tests.length, error: 'Invalid function name', logs: [] });
-  return new Promise((resolve) => {
-    const w = new Worker(WORKER, {
-      eval: true,
-      workerData: { code, fn, tests: tests.map((t) => ({ args: t.args, expected: t.expected, hidden: !!t.hidden })) },
-      resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 },
+  const input = JSON.stringify({ code, fn, tests: tests.map((t) => ({ args: t.args, expected: t.expected, hidden: !!t.hidden })) });
+  return slot(() => new Promise<RunResult>((resolve) => {
+    const fail = (error: string): RunResult => ({ results: tests.map((t) => ({ pass: false, hidden: t.hidden, error, ms: 0 })), passed: 0, total: tests.length, error, logs: [] });
+    // --permission with no --allow-* flags: no fs, child processes, workers, addons or WASI.
+    const child = spawn(process.execPath, ['--permission', '--max-old-space-size=64', '--stack-size=984', '-e', WORKER], {
+      env: {}, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
     });
-    const done = (r: RunResult) => { clearTimeout(kill); w.terminate(); resolve(r); };
-    const kill = setTimeout(() => done({ results: tests.map((t) => ({ pass: false, hidden: t.hidden, error: 'Timed out', ms: 5000 })), passed: 0, total: tests.length, error: 'Timed out after 5 s', logs: [] }), 5000);
-    w.once('message', (m: { results: TestResult[]; logs: string[]; error: string | null }) => {
-      const results = m.results.map((r, i) => (tests[i].hidden ? { ...r } : { ...r, args: tests[i].args, expected: tests[i].expected }));
-      done({ results, passed: results.filter((r) => r.pass).length, total: results.length, error: m.error ?? undefined, logs: m.logs });
+    let out = '', err = '', settled = false;
+    const done = (r: RunResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(kill);
+      child.kill('SIGKILL');
+      resolve(r);
+    };
+    const kill = setTimeout(() => done({ ...fail('Timed out'), error: 'Timed out after 5 s' }), 5000);
+    child.stdout.setEncoding('utf8').on('data', (d: string) => {
+      out += d;
+      if (out.length > MAX_OUTPUT) done(fail('Output too large'));
     });
-    w.once('error', (e: Error) => done({ results: [], passed: 0, total: tests.length, error: e.message, logs: [] }));
-  });
+    child.stderr.setEncoding('utf8').on('data', (d: string) => { if (err.length < 4000) err += d; });
+    child.on('error', (e) => done(fail(e.message)));
+    child.on('close', (status) => {
+      let m: { results: TestResult[]; logs: string[]; error: string | null };
+      try {
+        m = JSON.parse(out);
+        if (!Array.isArray(m.results) || m.results.length !== tests.length) throw new Error('bad output');
+      } catch {
+        const oom = /heap out of memory|Allocation failed/i.test(err);
+        return done(fail(oom ? 'Out of memory' : `The code runner stopped unexpectedly (exit ${status}).`));
+      }
+      const results = m.results.map((r, i) => {
+        const clean: TestResult = { pass: r.pass === true, hidden: tests[i].hidden, ms: Number(r.ms) || 0 };
+        if (r.actual !== undefined) clean.actual = String(r.actual).slice(0, 300);
+        if (r.error !== undefined) clean.error = String(r.error).slice(0, 300);
+        return tests[i].hidden ? clean : { ...clean, args: tests[i].args, expected: tests[i].expected };
+      });
+      const logs = Array.isArray(m.logs) ? m.logs.slice(0, 50).map((l) => String(l).slice(0, 500)) : [];
+      done({ results, passed: results.filter((r) => r.pass).length, total: results.length, error: m.error ? String(m.error) : undefined, logs });
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(input);
+  }));
 }
 
 /** Hide details of hidden tests before sending results to the UI. */

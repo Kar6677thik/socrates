@@ -66,6 +66,24 @@ test('code runner: pass, fail, errors, timeouts and no host access', async () =>
   assert.equal(und.passed, 0, 'undefined must not pass as null');
 });
 
+test('code runner: escaping the VM context still cannot touch the host', async () => {
+  // The VM is not a boundary: this escape works. The child process's permission model is what holds.
+  const host = "const p = console.log.constructor('return process')();";
+  const probe = (expr: string) => runJs(`function solution() { ${host} try { return ${expr} } catch (e) { return e.code || e.message } }`, [{ args: [], expected: 'x' }]);
+  const reached = await probe(`typeof p.pid`);
+  assert.equal(reached.results[0].actual, '"number"', 'the escape does reach a real process object');
+  const read = await probe(`p.getBuiltinModule('node:fs').readFileSync(${JSON.stringify(process.execPath)}).length`);
+  assert.equal(read.results[0].actual, '"ERR_ACCESS_DENIED"');
+  const write = await probe(`p.getBuiltinModule('node:fs').writeFileSync('socrates-pwned.txt', 'x')`);
+  assert.equal(write.results[0].actual, '"ERR_ACCESS_DENIED"');
+  const spawnIt = await probe(`p.getBuiltinModule('node:child_process').execSync('echo hi').toString()`);
+  assert.equal(spawnIt.results[0].actual, '"ERR_ACCESS_DENIED"');
+  const env = await probe(`Object.keys(p.env).filter((k) => /SOCRATES|TOKEN|SECRET|PASSWORD/i.test(k)).length`);
+  assert.equal(env.results[0].actual, '0');
+  const mem = await runJs('function solution() { const a = []; while (true) a.push(new Array(1e6).fill(1)); }', [{ args: [], expected: 1 }]);
+  assert.equal(mem.passed, 0);
+});
+
 test('code questions: JS with tests is auto-graded, other languages wait for a grade', async () => {
   const app = new App(':memory:');
   app.tags.create('Prog');

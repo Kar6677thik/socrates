@@ -1,0 +1,168 @@
+# Socrates on Megatron (k3s). Runbook: docs/DEPLOY.md.
+#   :8080 ui   UI + API + owner login. tailscale serve svc:socrates -> https://socrates.tailf67d61.ts.net (tailnet only)
+#   :8081 mcp  /mcp (Orbit Identity OAuth) + /.well-known/oauth-protected-resource only. cloudflared ->
+#              https://socrates-mcp.karthiksurkanti.in (path-filtered to exactly those paths)
+# Value to replace before applying:
+#   IMAGE_DIGEST    the digest deploy/import-image.sh printed
+# Provisioned separately, never in this file:
+#   Secret    socrates-owner   keys "verifier" and "totp" (scripts/credentials.ts or Orbit.Credentials; not Orbit's own)
+#   ConfigMap socrates-jwks    key "jwks.json": Orbit Identity's public keys (curl https://auth.karthiksurkanti.in/.well-known/jwks)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: socrates
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: socrates
+  namespace: socrates
+# Socrates never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: socrates-data
+  namespace: socrates
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: { storage: 2Gi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: socrates
+  namespace: socrates
+spec:
+  # SQLite on a ReadWriteOnce volume: exactly one writer, and the old pod stops before the new one starts.
+  replicas: 1
+  strategy:
+    type: Recreate
+  progressDeadlineSeconds: 180
+  selector:
+    matchLabels: { app: socrates }
+  template:
+    metadata:
+      labels: { app: socrates }
+    spec:
+      serviceAccountName: socrates
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: socrates
+          image: ghcr.io/kar6677thik/socrates@sha256:IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          ports:
+            - { name: ui, containerPort: 8080 }
+            - { name: mcp, containerPort: 8081 }
+          env:
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "8080" }
+            - { name: SOCRATES_DATA, value: /data }
+            # UI: exact Host allow-list (plus localhost for probes), unsafe requests must come from this origin.
+            - { name: SOCRATES_PUBLIC_ORIGIN, value: "https://socrates.tailf67d61.ts.net" }
+            # Links in MCP results open the tailnet UI.
+            - { name: SOCRATES_URL, value: "https://socrates.tailf67d61.ts.net" }
+            # tailscale serve and cloudflared both run on the node and reach the pod from its cni0 address.
+            - { name: SOCRATES_TRUSTED_PROXY, value: "10.42.0.1" }
+            - { name: SOCRATES_CREDENTIAL_FILE, value: /run/socrates/owner/verifier }
+            - { name: SOCRATES_TOTP_FILE, value: /run/socrates/owner/totp }
+            # MCP: its own listener, Orbit Identity access tokens only (RFC 9068, ES256), owner subject only.
+            - { name: SOCRATES_MCP_PORT, value: "8081" }
+            - { name: SOCRATES_MCP_PUBLIC_ORIGIN, value: "https://socrates-mcp.karthiksurkanti.in" }
+            - { name: SOCRATES_MCP_ALLOWED_ORIGINS, value: "https://claude.ai" }
+            - { name: SOCRATES_OAUTH_ISSUER, value: "https://auth.karthiksurkanti.in/" }
+            - { name: SOCRATES_OAUTH_RESOURCE, value: "https://socrates-mcp.karthiksurkanti.in/mcp" }
+            # Orbit Identity's owner subject (an identifier, not a secret).
+            - { name: SOCRATES_OAUTH_ALLOWED_SUBJECTS, value: "7356e980-f25e-4c82-84f1-b00c5f9783f0" }
+            - { name: SOCRATES_OAUTH_JWKS_FILE, value: /run/socrates/jwks/jwks.json }
+          resources:
+            # The embedding model (~90 MB resident) plus up to two code-runner processes (64 MB heap each).
+            requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 32Mi }
+            limits: { cpu: "1", memory: 768Mi, ephemeral-storage: 512Mi }
+          startupProbe:
+            httpGet: { path: /health/ready, port: ui, httpHeaders: [{ name: Host, value: localhost }] }
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health/ready, port: ui, httpHeaders: [{ name: Host, value: localhost }] }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: ui, httpHeaders: [{ name: Host, value: localhost }] }
+            periodSeconds: 20
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: owner, mountPath: /run/socrates/owner, readOnly: true }
+            - { name: jwks, mountPath: /run/socrates/jwks, readOnly: true }
+            - { name: temporary, mountPath: /tmp }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: socrates-data }
+        - name: owner
+          secret: { secretName: socrates-owner, defaultMode: 0440 }
+        - name: jwks
+          configMap: { name: socrates-jwks, defaultMode: 0444 }
+        # Database exports and Anki imports unpack here; disk-backed so they don't count against memory.
+        - name: temporary
+          emptyDir: { sizeLimit: 384Mi }
+---
+# A fixed ClusterIP so tailscale serve and cloudflared can point at it. Taken: .100 Orbit, .101 Identity, .102 Sprawl,
+# .103 VictoriaMetrics, .104 DELPHI. Re-check before applying: kubectl get svc -A -o wide | grep '10.43.0.10'
+apiVersion: v1
+kind: Service
+metadata:
+  name: socrates
+  namespace: socrates
+spec:
+  type: ClusterIP
+  clusterIP: 10.43.0.105
+  selector: { app: socrates }
+  ports:
+    - { name: ui, port: 8080, targetPort: ui }
+    - { name: mcp, port: 8081, targetPort: mcp }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: socrates
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Policies see post-kube-proxy addresses: tailscale serve, cloudflared and kubelet probes all arrive from the node's
+# cni0 address. No egress at all: the model is in the image, the JWKS is a mounted file, and submitted code must
+# not reach any network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: socrates
+  namespace: socrates
+spec:
+  podSelector:
+    matchLabels: { app: socrates }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock: { cidr: 10.42.0.1/32 }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8081 }
+  egress: []
