@@ -135,6 +135,9 @@ test('MCP: generate_from_source prompt and the planning/linking instructions', a
 // ---------------------------------------------------------------- rewards
 
 const MIN = 60_000, HOUR = 3600_000, DAY = 864e5;
+// Reward tests run on a pinned clock: 10:00 local on a fixed date, so every scenario sits well inside one study day
+// (which rolls over at 04:00 local) whatever the time of the run and whatever TZ the process has.
+const BASE = new Date(2026, 9, 15, 10, 0, 0).getTime();
 
 /** A bank of old questions plus raw attempt inserts with exact server timestamps. */
 function rewardsFixture() {
@@ -145,8 +148,8 @@ function rewardsFixture() {
   items.push({ type: 'short_answer', prompt: 'Explain why mitochondria have their own DNA', model_answer: 'Endosymbiosis', tags: ['bio > cells'] });
   items.push({ type: 'flashcard', prompt: 'What is the powerhouse of the cell?', back: 'Mitochondria', tags: ['bio > cells'] });
   const ids = (app.questions.add(items) as any[]).map((r) => r.id);
-  app.db.prepare('UPDATE questions SET created_at = ?').run(Date.now() - 30 * DAY); // old questions
-  const t0 = Date.now() - 6 * HOUR;
+  const t0 = BASE;
+  app.db.prepare('UPDATE questions SET created_at = ?').run(t0 - 30 * DAY); // old questions
   app.rewards.tick(t0); // switch rewards on: sessions before now never pay
   const session = (startedAt: number, endedAt: number | null = null) =>
     Number(app.db.prepare(`INSERT INTO sessions(mode, config, queue, started_at, ended_at) VALUES('practice','{}','[]',?,?)`).run(startedAt, endedAt).lastInsertRowid);
@@ -240,7 +243,7 @@ test('rewards: daily sanity cap and undo', () => {
   const { app, t0, session, attempt, events } = rewardsFixture();
   app.tags.create('bio > more');
   const extra = (app.questions.add(Array.from({ length: 70 }, (_, i) => ({ type: 'true_false', prompt: `Extra biology statement number ${i} concerning enzyme ${i * 7}`, correct: true, tags: ['bio > more'] }))) as any[]).map((r) => r.id);
-  app.db.prepare('UPDATE questions SET created_at = ?').run(Date.now() - 30 * DAY);
+  app.db.prepare('UPDATE questions SET created_at = ?').run(t0 - 30 * DAY);
   const ids = extra;
   let at = t0 + HOUR;
   // 70 sessions of 3 credited minutes = 210 > 180 cap, all on one study day.
@@ -257,6 +260,29 @@ test('rewards: daily sanity cap and undo', () => {
   const id = attempt(s2, ids[0], at + 2 * DAY + 2 * MIN);
   app.db.prepare('DELETE FROM attempts WHERE id = ?').run(id);
   assert.equal(app.rewards.tick(at + 3 * DAY).study, 0);
+});
+
+test('rewards: the daily cap is per study day, and the day rolls over at 04:00 local', () => {
+  const { app, t0, session, attempt, events } = rewardsFixture();
+  app.tags.create('bio > boundary');
+  const ids = (app.questions.add(Array.from({ length: 80 }, (_, i) => ({ type: 'true_false', prompt: `Boundary biology statement ${i} about protein ${i * 11}`, correct: true, tags: ['bio > boundary'] }))) as any[]).map((r) => r.id);
+  app.db.prepare('UPDATE questions SET created_at = ?').run(t0 - 30 * DAY);
+  // 40 sessions of 3 credited minutes ending before 04:00 local, then 40 after: 120 + 120 minutes over two study days.
+  const rollover = new Date(2026, 9, 16, 4, 0, 0).getTime();
+  const due = (at: number) => JSON.stringify({ due: new Date(at - DAY).toISOString() });
+  let at = rollover - 40 * 4 * MIN - MIN;
+  for (let i = 0; i < 80; i++) {
+    if (i === 40) at = rollover + MIN;
+    const sid = session(at, at + 4 * MIN);
+    attempt(sid, ids[i], at + 3 * MIN, { srsBefore: due(at) });
+    at += 4 * MIN;
+  }
+  app.rewards.tick(at + HOUR);
+  const byDay = new Map<string, number>();
+  for (const e of events().filter((e) => e.kind === 'study_minutes')) byDay.set(e.day, (byDay.get(e.day) ?? 0) + e.minutes);
+  assert.deepEqual([...byDay.keys()].sort(), [studyDay(rollover - MIN), studyDay(rollover + MIN)]);
+  assert.notEqual(studyDay(rollover - MIN), studyDay(rollover + MIN), '04:00 local starts a new study day');
+  for (const [day, total] of byDay) assert.equal(total, 120, `${day}: each day under its own cap`);
 });
 
 test('rewards: mastery thresholds once per leaf tag, with evidence; baseline pays nothing', () => {
