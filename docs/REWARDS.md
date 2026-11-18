@@ -1,6 +1,6 @@
 # Study rewards (Socrates → Hey Ann)
 
-Real study in Socrates earns screen-time minutes in Hey Ann's wallet. This document is the **Socrates side**: what counts as study, how it's measured, and the events Socrates emits. Hey Ann's `docs/REWARDS.md` covers pricing, rates and wallet caps. The rules were agreed between the two app threads on 18 Nov 2026 and await the owner's approval there.
+Real study in Socrates earns screen-time minutes in Hey Ann's wallet. This document is the **Socrates side**: what counts as study, how it's measured, and the events Socrates emits. Hey Ann's `docs/REWARDS.md` covers pricing, rates and wallet caps. The rules were agreed between the two app threads on 18 Nov 2026 and **approved by the owner**, together with Hey Ann's pricing (Hey Ann `docs/REWARDS.md` §10).
 
 **Status:** Socrates computes the events and keeps them in an outbox (`reward_events`), visible at `GET /api/rewards`. Nothing is sent yet. The transport (a signed call or an event outbox using Orbit Identity client credentials) comes from Orbit's contract.
 
