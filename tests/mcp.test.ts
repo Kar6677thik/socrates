@@ -27,7 +27,7 @@ test('MCP: tool list, instructions and prompts', async () => {
     assert.ok(tools.includes(t), `missing tool ${t}`);
   assert.match(client.getInstructions() ?? '', /get_tag_tree/);
   const prompts = (await client.listPrompts()).prompts.map((p) => p.name);
-  assert.deepEqual(prompts.sort(), ['generate_targeted_questions', 'grade_pending']);
+  assert.deepEqual(prompts.sort(), ['generate_from_source', 'generate_targeted_questions', 'grade_pending']);
 });
 
 test('MCP: agent workflow with strict tagging, dedup, grading and audit', async () => {

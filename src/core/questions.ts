@@ -42,6 +42,33 @@ export const MAX_BATCH = 100;
 
 const SPEC_FIELDS = [...new Set(Object.values(SPECS).flatMap((s) => Object.keys(s.shape)))];
 
+/**
+ * Where a question came from in another app, the shared cross-app reference ({app, id, url, title}), e.g. the Slate
+ * note or Sprawl card it was written from. `id` is the stable key (`note:<guid>`, `card:<id>`); `url` and `title` are
+ * display hints captured when the question was made.
+ */
+export const SourceRef = z
+  .object({
+    app: z.string().regex(/^[a-z][a-z0-9-]{1,31}$/, 'lowercase app name, e.g. "slate"').describe('App the item lives in: slate, sprawl, …'),
+    id: z.string().min(1).max(200).regex(/^\S+$/, 'no spaces').describe('Stable id in that app, e.g. "note:<guid>" for a Slate note'),
+    url: z
+      .string()
+      .max(2000)
+      .refine((u) => {
+        try {
+          const x = new URL(u);
+          return x.protocol === 'https:' || (x.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/.test(x.hostname));
+        } catch {
+          return false;
+        }
+      }, 'must be an absolute https URL')
+      .optional()
+      .describe("The item's own web address, copied exactly from that app's tool result"),
+    title: z.string().max(300).optional().describe('Its title when the question was made'),
+  })
+  .strict();
+export type SourceRef = z.infer<typeof SourceRef>;
+
 /** Flat input shape: common fields + the type-specific fields for `type`. */
 export const QuestionInput = z
   .object({
@@ -51,7 +78,11 @@ export const QuestionInput = z
     difficulty: z.number().int().min(1).max(5).optional().describe('1 easy .. 5 hard. Default 3.'),
     explanation: z.string().optional().describe('Shown after answering (markdown)'),
     hints: z.array(z.string()).max(5).optional(),
-    source: z.string().optional().describe('Where this came from (book, URL, lecture)'),
+    source: z
+      .union([SourceRef, z.string().max(500)])
+      .optional()
+      .describe('The item in another app this question was made from: {app, id, url, title}. (A plain string is taken as citation.)'),
+    citation: z.string().max(500).optional().describe('Free-text source: book, chapter, lecture, web page'),
     group_id: z.string().optional().describe('Questions sharing a group are never shown back to back'),
     client_ref: z.string().max(200).optional().describe('Idempotency key. Retrying with the same key returns the existing question.'),
   })
@@ -67,7 +98,10 @@ export interface Question {
   hints: string[];
   difficulty: number;
   irt_b: number | null;
-  source: string | null;
+  /** Free-text source (book, lecture). Stored in the `source` column for historical reasons. */
+  citation: string | null;
+  /** Structured cross-app source, see SourceRef. */
+  source: SourceRef | null;
   group_id: string | null;
   status: 'draft' | 'active' | 'suspended' | 'archived';
   flagged_reason: string | null;
@@ -95,8 +129,11 @@ export interface SimilarHit {
 }
 
 function rowToQuestion(r: any, tags: Question['tags']): Question {
+  const { source, source_ref, embedding, ...rest } = r;
   return {
-    ...r,
+    ...rest,
+    citation: source ?? null,
+    source: source_ref ? JSON.parse(source_ref) : null,
     spec: JSON.parse(r.spec),
     hints: JSON.parse(r.hints),
     near_duplicate_of: r.near_duplicate_of ? JSON.parse(r.near_duplicate_of) : null,
@@ -114,9 +151,18 @@ export class Questions {
 
   /** Split a flat input into common fields + validated spec. */
   validate(input: unknown): { ok: true; q: QuestionInput; spec: any } | { ok: false; errors: string[] } {
-    const base = QuestionInput.safeParse(input);
+    // null means "not given" (the editor sends explanation: null for an empty box), never a value.
+    const cleaned = input && typeof input === 'object' && !Array.isArray(input)
+      ? Object.fromEntries(Object.entries(input).filter(([, v]) => v !== null))
+      : input;
+    const base = QuestionInput.safeParse(cleaned);
     if (!base.success) return { ok: false, errors: base.error.issues.map((i) => `${i.path.join('.') || 'item'}: ${i.message}`) };
     const q = base.data as QuestionInput;
+    // Older clients and imports send `source` as text: that is a citation.
+    if (typeof q.source === 'string') {
+      if (q.citation === undefined && q.source.trim()) q.citation = q.source.trim();
+      delete q.source;
+    }
     const raw: Record<string, unknown> = {};
     for (const k of SPEC_FIELDS) if (k in q) raw[k] = q[k];
     const spec = SPECS[q.type].strict().safeParse(raw);
@@ -401,13 +447,13 @@ export class Questions {
         const t = now();
         const info = this.db
           .prepare(
-            `INSERT INTO questions(type, prompt, spec, explanation, hints, difficulty, source, group_id, status,
+            `INSERT INTO questions(type, prompt, spec, explanation, hints, difficulty, source, source_ref, group_id, status,
                near_duplicate_of, content_hash, client_ref, created_by, created_at, updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           )
           .run(
             q.type, q.prompt, JSON.stringify(spec), q.explanation ?? null, JSON.stringify(q.hints ?? []), q.difficulty ?? 3,
-            q.source ?? null, q.group_id ?? null, status,
+            q.citation ?? null, q.source ? JSON.stringify(q.source) : null, q.group_id ?? null, status,
             near.filter((h) => h.id > 0).length ? JSON.stringify(near.filter((h) => h.id > 0).map((h) => h.id)) : null,
             hash, q.client_ref ?? null, actor, t, t,
           );
@@ -456,7 +502,7 @@ export class Questions {
       if (!cur) throw new Error(`Question ${id} not found.`);
       const merged: Record<string, unknown> = {
         type: cur.type, prompt: cur.prompt, tags: cur.tags.map((t) => t.path), difficulty: cur.difficulty,
-        explanation: cur.explanation ?? undefined, hints: cur.hints, source: cur.source ?? undefined,
+        explanation: cur.explanation ?? undefined, hints: cur.hints, citation: cur.citation ?? undefined, source: cur.source ?? undefined,
         group_id: cur.group_id ?? undefined, ...(patch.type && patch.type !== cur.type ? {} : cur.spec),
       };
       for (const [k, v] of Object.entries(patch)) if (v !== undefined && k !== 'id' && k !== 'client_ref') merged[k] = v === null ? undefined : v;
@@ -476,12 +522,12 @@ export class Questions {
       if (dup) throw new Error(`This edit would make the question identical to question ${dup.id}.`);
       this.db
         .prepare(
-          `UPDATE questions SET type=?, prompt=?, spec=?, explanation=?, hints=?, difficulty=?, source=?, group_id=?,
+          `UPDATE questions SET type=?, prompt=?, spec=?, explanation=?, hints=?, difficulty=?, source=?, source_ref=?, group_id=?,
              content_hash=?, version=version+1, updated_at=?, irt_b = CASE WHEN ? THEN NULL ELSE irt_b END WHERE id=?`,
         )
         .run(
           q.type, q.prompt, JSON.stringify(spec), q.explanation ?? null, JSON.stringify(q.hints ?? []), q.difficulty ?? 3,
-          q.source ?? null, q.group_id ?? null, hash, now(), kind === 'major' ? 1 : 0, id,
+          q.citation ?? null, q.source ? JSON.stringify(q.source) : null, q.group_id ?? null, hash, now(), kind === 'major' ? 1 : 0, id,
         );
       if (patch.flagged_reason === null || kind === 'major') this.db.prepare('UPDATE questions SET flagged_reason = NULL WHERE id = ?').run(id);
       this.db.prepare('DELETE FROM question_tags WHERE question_id = ?').run(id);
@@ -500,7 +546,7 @@ export class Questions {
     const row = this.db.prepare('SELECT snapshot FROM question_versions WHERE question_id = ? AND version = ?').get(id, version) as { snapshot: string } | undefined;
     if (!row) throw new Error(`Version ${version} of question ${id} not found.`);
     const s = JSON.parse(row.snapshot);
-    return this.update(id, { type: s.type, prompt: s.prompt, ...s.spec, explanation: s.explanation ?? null, hints: s.hints, difficulty: s.difficulty, tags: s.tags, source: s.source ?? null, group_id: s.group_id ?? null }, { actor });
+    return this.update(id, { type: s.type, prompt: s.prompt, ...s.spec, explanation: s.explanation ?? null, hints: s.hints, difficulty: s.difficulty, tags: s.tags, citation: s.citation ?? null, source: s.source ?? null, group_id: s.group_id ?? null }, { actor });
   }
 
   setStatus(ids: number[], status: Question['status']) {

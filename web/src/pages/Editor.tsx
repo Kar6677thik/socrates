@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
-import { api, useApi, invalidate, TYPES, TYPE_LABELS, ago, pct, fmtMs, fmtDue, tagLabel, useTagNames, type Question, type QType } from '../lib/api';
+import { api, useApi, invalidate, TYPES, TYPE_LABELS, ago, pct, fmtMs, fmtDue, tagLabel, useTagNames, type Question, type QType, type SourceRef } from '../lib/api';
 import { Md, firstAlt } from '../lib/md';
 import { useKeys } from '../lib/keys';
-import { Button, Field, Badge, Card, Segmented, toast, Kbd } from '../components/ui';
+import { Button, Field, Badge, Card, Segmented, toast, Kbd, SourceLine } from '../components/ui';
 import { TagInput } from '../components/TagInput';
 import { PromptField, ClozeHelp, MatchingForm, OrderingForm, CodeForm, HotspotForm } from '../components/EditorExtras';
 
@@ -17,7 +17,9 @@ export interface Draft {
   difficulty: number;
   explanation: string;
   hints: string[];
-  source: string;
+  citation: string;
+  /** Link to the note/card it was made from; kept as is unless removed. */
+  source: SourceRef | null;
   spec: any;
 }
 
@@ -38,7 +40,7 @@ const DEFAULT_SPEC: Record<QType, any> = {
 
 export const toDraft = (q: Question): Draft => ({
   type: q.type, prompt: q.prompt, tags: q.tags.map((t) => t.path), difficulty: q.difficulty,
-  explanation: q.explanation ?? '', hints: q.hints, source: q.source ?? '', spec: q.spec,
+  explanation: q.explanation ?? '', hints: q.hints, citation: q.citation ?? '', source: q.source, spec: q.spec,
 });
 
 /** Flat payload the API expects (common fields + type-specific fields). */
@@ -65,7 +67,7 @@ export function toPayload(d: Draft) {
   }
   return {
     type: d.type, prompt: d.prompt, tags: d.tags, difficulty: d.difficulty,
-    explanation: d.explanation.trim() || null, hints: d.hints.filter((h) => h.trim()), source: d.source.trim() || null, ...spec,
+    explanation: d.explanation.trim() || null, hints: d.hints.filter((h) => h.trim()), citation: d.citation.trim() || null, source: d.source, ...spec,
   };
 }
 
@@ -206,8 +208,14 @@ export function QuestionForm({ draft, onChange }: { draft: Draft; onChange: (d: 
             ))}
           </div>
         </Field>
-        <Field label="Source"><input className="field h-8" value={draft.source} placeholder="Book, URL, lecture…" onChange={(e) => set({ source: e.target.value })} /></Field>
+        <Field label="Citation"><input className="field h-8" value={draft.citation} placeholder="Book, chapter, lecture…" onChange={(e) => set({ citation: e.target.value })} /></Field>
       </div>
+      {draft.source && (
+        <div className="flex items-center gap-3">
+          <SourceLine source={draft.source} />
+          <button type="button" className="text-[12px] text-faint hover:text-text" onClick={() => set({ source: null })}>Remove link</button>
+        </div>
+      )}
 
       <Field label="Explanation" hint="Shown after answering.">
         <textarea className="field" rows={3} value={draft.explanation} onChange={(e) => set({ explanation: e.target.value })} />
@@ -308,7 +316,7 @@ interface Detail {
 export default function Editor({ id }: { id?: number }) {
   const [, nav] = useLocation();
   const { data } = useApi<Detail>(id ? `/questions/${id}` : null);
-  const [draft, setDraft] = useState<Draft | null>(id ? null : { type: 'mcq_single', prompt: '', tags: [], difficulty: 3, explanation: '', hints: [], source: '', spec: DEFAULT_SPEC.mcq_single });
+  const [draft, setDraft] = useState<Draft | null>(id ? null : { type: 'mcq_single', prompt: '', tags: [], difficulty: 3, explanation: '', hints: [], citation: '', source: null, spec: DEFAULT_SPEC.mcq_single });
   const [saving, setSaving] = useState(false);
   const [issues, setIssues] = useState<string[]>([]);
 

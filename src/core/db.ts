@@ -170,6 +170,22 @@ const MIGRATIONS: string[] = [
   ALTER TABLE attempts ADD COLUMN elapsed_days REAL;    -- days since previous review
   ALTER TABLE attempts ADD COLUMN engine_before TEXT;   -- ability/difficulty before this attempt (undo)
   `,
+  /* 3: cross-app sources, rewards outbox */ `
+  ALTER TABLE questions ADD COLUMN source_ref TEXT;     -- JSON {app, id, url?, title?}: the note/card it was made from
+
+  -- Study rewards for Hey Ann, computed by the server only (docs/REWARDS.md). Append-only; a transport ships rows
+  -- and stamps delivered_at. event_id is the idempotency key the receiver dedupes on.
+  CREATE TABLE reward_events (
+    event_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,                -- study_minutes | mastery_up
+    day TEXT NOT NULL,                 -- study day (local, rolls over at 04:00)
+    occurred_at INTEGER NOT NULL,
+    payload TEXT NOT NULL,             -- JSON event body
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER
+  );
+  CREATE INDEX reward_events_undelivered ON reward_events(created_at) WHERE delivered_at IS NULL;
+  `,
 ];
 
 export function openDb(path = DEFAULT_DB_PATH): DB {

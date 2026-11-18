@@ -2,6 +2,7 @@ import { type DB, now } from './db.ts';
 import { studyDay, endOfStudyDay, limits, cardRetrievability, fsrsDecay } from './srs.ts';
 import type { Tags } from './tags.ts';
 import { clozeParts } from './qtypes.ts';
+import { links, webOrigin } from './links.ts';
 
 export class Stats {
   db: DB;
@@ -241,6 +242,77 @@ export class Stats {
     return out.slice(0, limit);
   }
 
+  /**
+   * Study tasks for a planner such as Hey Ann (shape agreed with it; see docs/REWARDS.md for the reward side): due
+   * reviews, then weak, overconfident and fading leaf tags. Each has a one-tap start link and a stable `source.id`
+   * (`tag:<id>`, `due-reviews`) the planner dedupes on, so it never contains the day or a mastery figure.
+   */
+  studyTasks(limit = 5) {
+    const at = now(), day = 864e5;
+    const origin = webOrigin();
+    // Median answer time (ms) over recent graded answers, in one tag subtree or overall.
+    const median = (tagId?: number): number | null => {
+      const filter = tagId ? `AND a.question_id IN (SELECT question_id FROM question_tags WHERE tag_id IN (${this.tags.descendantIds(tagId).join(',')}))` : '';
+      const xs = (this.db.prepare(`SELECT a.time_ms t FROM attempts a WHERE a.score IS NOT NULL ${filter} ORDER BY a.id DESC LIMIT 200`).all() as { t: number }[])
+        .map((r) => Math.min(r.t, 6 * 60_000)).sort((a, b) => a - b);
+      return xs.length ? xs[Math.floor(xs.length / 2)] : null;
+    };
+    const estimate = (n: number, ms: number | null) => Math.min(45, Math.max(5, Math.ceil((n * (ms ?? 60_000)) / 60_000 / 5) * 5));
+    const mistakesThisWeek = (tagId: number) =>
+      (this.db.prepare(
+        `SELECT COUNT(*) n FROM attempts a WHERE a.score IS NOT NULL AND a.score < 0.8 AND a.answered_at >= ?
+           AND a.question_id IN (SELECT question_id FROM question_tags WHERE tag_id IN (${this.tags.descendantIds(tagId).join(',')}))`,
+      ).get(at - 7 * day) as { n: number }).n;
+    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+    const tasks: StudyTask[] = [];
+    const h = this.home();
+    const reviews = h.due + h.new_available;
+    if (reviews > 0)
+      tasks.push({
+        kind: 'review', title: 'Study: due reviews',
+        reason: `${plural(h.due, 'review')} due today${h.new_available ? `, ${h.new_available} new` : ''}. Keeps the schedule on track.`,
+        estimate_min: estimate(Math.min(reviews, 60), median()), session_url: links.start({ mode: 'srs' }),
+        source: { app: 'socrates', id: 'due-reviews', url: `${origin}/study?mode=srs`, title: 'Due reviews' },
+      });
+
+    const seen = new Set<number>();
+    const tagTask = (kind: StudyTask['kind'], t: { id: number; name: string }, label: string, reason: string, mode: 'weak' | 'practice' | 'adaptive', n: number) => {
+      if (seen.has(t.id)) return;
+      seen.add(t.id);
+      tasks.push({
+        kind, title: `Study: ${t.name}`, reason, estimate_min: estimate(n, median(t.id)),
+        session_url: links.start({ mode, tagIds: [t.id], limit: n }),
+        source: { app: 'socrates', id: `tag:${t.id}`, url: links.tag(t.id)!, title: `${label}: ${t.name}` },
+      });
+    };
+    const leaves = this.tagMastery({ minAttempts: 3 }).filter((m) => m.leaf);
+    for (const w of leaves.filter((m) => m.mastery < 0.6)) {
+      const miss = mistakesThisWeek(w.id);
+      tagTask('weak', w, 'Weak area',
+        `Mastery ${Math.round(w.mastery * 100)}%${w.trend != null && w.trend < -0.02 ? ' and falling' : ''}${miss ? `; ${plural(miss, 'mistake')} this week` : ''}.`, 'weak', 15);
+    }
+    for (const o of leaves.filter((m) => m.confident_wrong >= 2).sort((a, b) => b.confident_wrong - a.confident_wrong))
+      tagTask('overconfident', o, 'Misconception check', `${plural(o.confident_wrong, 'answer')} this month where you were sure but wrong.`, 'practice', 10);
+    // Fading: reviewed leaf tags whose average recall has dropped before their cards come due.
+    const decayW = fsrsDecay(this.db);
+    const leafIds = new Set(leaves.map((l) => l.id));
+    const recall = new Map<number, { name: string; sum: number; n: number }>();
+    for (const r of this.db
+      .prepare(`SELECT t.id, t.name, c.card FROM srs_cards c JOIN question_tags qt ON qt.question_id = c.question_id JOIN tags t ON t.id = qt.tag_id WHERE c.due > ? AND t.merged_into_id IS NULL`)
+      .all(at) as { id: number; name: string; card: string }[]) {
+      if (!leafIds.has(r.id)) continue;
+      const e = recall.get(r.id) ?? { name: r.name, sum: 0, n: 0 };
+      e.sum += cardRetrievability(JSON.parse(r.card), at, decayW);
+      e.n++;
+      recall.set(r.id, e);
+    }
+    for (const [id, e] of [...recall].filter(([, e]) => e.n >= 3 && e.sum / e.n < 0.88).sort((a, b) => a[1].sum / a[1].n - b[1].sum / b[1].n))
+      tagTask('fading', { id, name: e.name }, 'Fading', `Estimated recall is down to ${Math.round((e.sum / e.n) * 100)}%. A short session now saves relearning later.`, 'adaptive', 10);
+
+    return tasks.slice(0, limit).map((t, i) => ({ ...t, priority: i + 1 }));
+  }
+
   /** Everything the analytics dashboard needs, optionally limited to a tag subtree. */
   analytics(opts: { days?: number; tag?: string } = {}) {
     const days = opts.days ?? 90;
@@ -296,4 +368,13 @@ export class Stats {
       )
       .all(limit);
   }
+}
+
+export interface StudyTask {
+  kind: 'review' | 'weak' | 'overconfident' | 'fading';
+  title: string;
+  reason: string;
+  estimate_min: number;
+  session_url: string;
+  source: { app: 'socrates'; id: string; url: string; title: string };
 }

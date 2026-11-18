@@ -172,6 +172,7 @@ Build, import and apply with the new digest (steps 1 and 3). `Recreate` stops th
 | `SOCRATES_MCP_PORT`, `SOCRATES_MCP_PUBLIC_ORIGIN`, `SOCRATES_MCP_ALLOWED_ORIGINS` | The OAuth MCP listener. |
 | `SOCRATES_OAUTH_ISSUER`, `SOCRATES_OAUTH_RESOURCE`, `SOCRATES_OAUTH_ALLOWED_SUBJECTS`, `SOCRATES_OAUTH_JWKS_FILE` | Token checks. `SOCRATES_OAUTH_ALLOWED_CLIENTS` optionally limits client ids. |
 | `SOCRATES_DATA`, `SOCRATES_MODELS`, `SOCRATES_MODELS_OFFLINE` | Data directory; model directory; `1` = never download the model. |
-| `SOCRATES_URL` | Base URL for links in MCP results. |
+| `SOCRATES_URL` | Origin for the openable links in MCP results and study tasks (defaults to `SOCRATES_PUBLIC_ORIGIN`). |
+| `TZ` | The owner's time zone. The study day rolls over at 04:00 in it; without it the pod uses UTC. |
 
 Startup refuses incomplete or unsafe combinations (for example a deployed origin without the login files, a non-https origin, or OAuth without the owner subject).

@@ -20,6 +20,7 @@ const Activity = lazy(() => import('./pages/Activity'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const Import = lazy(() => import('./pages/Import'));
+const StartSession = lazy(() => import('./pages/StartSession'));
 
 const NAV: { href: string; label: string; key: string; badge?: (h: Home) => number }[] = [
   { href: '/', label: 'Home', key: 'h' },
@@ -173,6 +174,7 @@ function Routes() {
         <Switch>
           <Route path="/" component={HomePage} />
           <Route path="/study">{() => <StudyPage />}</Route>
+          <Route path="/study/start" component={StartSession} />
           <Route path="/study/:id">{(p) => <StudyPage sessionId={Number(p.id)} />}</Route>
           <Route path="/library" component={Library} />
           <Route path="/library/new">{() => <Editor />}</Route>

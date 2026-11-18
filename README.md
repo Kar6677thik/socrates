@@ -26,6 +26,13 @@ The UI is installable as an app (Chrome/Edge: the install icon in the address ba
 
 `docs/DEPLOY.md` runs Socrates on a k3s server: the UI on your tailnet behind a password + authenticator login, and the MCP endpoint public behind Orbit Identity OAuth. `Dockerfile` and `deploy/` hold the image and manifests. Locally nothing changes: no login, localhost only.
 
+## Works with Slate, Sprawl and Hey Ann
+
+- **Questions from a note or card:** the `generate_from_source` prompt has an agent read a Slate note or Sprawl card, write questions of fitting types, check for duplicates, tag them, and link each one back through `source` (`{app, id, url, title}`). The link shows after you answer, and in the editor.
+- **Openable links:** MCP results carry `url` for questions, sessions and tags (`question_url` on things that refer to a question), built on the server from `SOCRATES_URL`.
+- **Study tasks:** `get_study_tasks` returns due reviews and weak, misconception and fading areas in the shape Hey Ann turns into cards: title, reason, estimate, a one-tap `/study/start?…` link and a stable `source`.
+- **Study rewards:** real study earns Hey Ann screen time, computed only from the server's own clocks and grading (`docs/REWARDS.md`). Events wait in an outbox (`GET /api/rewards`) until the Orbit Hub transport exists.
+
 ## Import
 
 Library → *Import*, or drop a file on the Import page. You see every question and tag before anything is added.
@@ -53,9 +60,9 @@ Settings → *Connect an AI agent* shows the exact commands with your paths and 
 | Tags | `get_tag_tree`, `resolve_tags`, `create_tags`, `add_tag_alias`, `merge_tags`, `move_tag` |
 | Questions | `add_questions` (bulk, `dry_run`, `client_ref`), `check_duplicates`, `update_question`, `set_question_status`, `search_questions`, `get_questions`, `upload_image` |
 | Grading | `list_pending_grades`, `submit_grades` |
-| Performance | `get_performance_summary`, `get_weak_areas` (calibrated mastery), `get_recommendations`, `get_recent_mistakes`, `get_coverage_gaps` |
+| Performance | `get_performance_summary`, `get_weak_areas` (calibrated mastery), `get_recommendations`, `get_study_tasks`, `get_recent_mistakes`, `get_coverage_gaps` |
 | Sessions | `create_quiz` |
-| Prompts | `generate_targeted_questions`, `grade_pending` |
+| Prompts | `generate_from_source`, `generate_targeted_questions`, `grade_pending` |
 
 ### Tagging rules (enforced by the server)
 

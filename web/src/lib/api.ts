@@ -81,7 +81,10 @@ export interface Question {
   explanation: string | null;
   hints: string[];
   difficulty: number;
-  source: string | null;
+  /** Free-text source: book, lecture. */
+  citation: string | null;
+  /** The note or card in another app this question was made from. */
+  source: SourceRef | null;
   group_id: string | null;
   status: 'draft' | 'active' | 'suspended' | 'archived';
   flagged_reason: string | null;
@@ -117,6 +120,9 @@ export interface Home {
   limits: { new_per_day: number; reviews_per_day: number; retention: number };
 }
 
+/** Shared cross-app reference: the Slate note, Sprawl card, … an item came from. */
+export interface SourceRef { app: string; id: string; url?: string; title?: string }
+
 export interface SubmitResult {
   attempt_id: number;
   grade_status: 'auto' | 'self' | 'pending';
@@ -127,6 +133,8 @@ export interface SubmitResult {
   next_due: number | null;
   answer: any;
   explanation: string | null;
+  source?: SourceRef | null;
+  citation?: string | null;
   predicted?: number;
   leech?: boolean;
 }
