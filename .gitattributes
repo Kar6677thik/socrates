@@ -1,0 +1,2 @@
+# Shell scripts run on Linux (Megatron); keep LF even when archived or checked out on Windows.
+*.sh text eol=lf
