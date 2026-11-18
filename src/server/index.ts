@@ -23,6 +23,16 @@ const runBackup = () => {
 };
 setTimeout(runBackup, 60_000).unref();
 setInterval(runBackup, 3600_000).unref();
+// Study reward events for Hey Ann (outbox only; nothing is sent until a transport exists).
+const runRewards = () => {
+  try {
+    app.rewards.tick();
+  } catch (e: any) {
+    console.error(`[socrates] Reward computation failed: ${e.message}`);
+  }
+};
+setTimeout(runRewards, 90_000).unref();
+setInterval(runRewards, 5 * 60_000).unref();
 // Embed any questions that don't have a vector yet (first run, offline adds, edits).
 setTimeout(() => app.backfillEmbeddings(), 1500).unref();
 

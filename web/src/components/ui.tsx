@@ -181,3 +181,30 @@ export function CopyBox({ text, label }: { text: string; label?: string }) {
     </div>
   );
 }
+
+const APP_NAMES: Record<string, string> = { slate: 'Slate', sprawl: 'Sprawl', socrates: 'Socrates', 'hey-ann': 'Hey Ann', ann: 'Hey Ann' };
+
+/** "From Slate: Raft consensus", linked when the source has a web address; plus a free-text citation. */
+export function SourceLine({ source, citation, className = '' }: { source?: { app: string; id: string; url?: string; title?: string } | null; citation?: string | null; className?: string }) {
+  if (!source && !citation) return null;
+  const app = source ? APP_NAMES[source.app] ?? source.app : '';
+  const label = source ? source.title || source.id : '';
+  // Only http(s) links are rendered as links (never javascript: or data: from stored content).
+  const href = source?.url && /^https?:\/\//i.test(source.url) ? source.url : null;
+  return (
+    <div className={`text-[12.5px] text-faint ${className}`}>
+      {source && (
+        <span>
+          From {app}:{' '}
+          {href ? (
+            <a href={href} target="_blank" rel="noopener noreferrer" className="text-muted underline decoration-line-strong underline-offset-2 hover:text-text">{label}</a>
+          ) : (
+            <span className="text-muted">{label}</span>
+          )}
+        </span>
+      )}
+      {source && citation && <span> · </span>}
+      {citation && <span>{citation}</span>}
+    </div>
+  );
+}

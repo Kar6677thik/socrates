@@ -27,6 +27,8 @@ export const SessionConfig = z.object({
   limit: z.number().int().min(1).max(500).optional(),
   include_new: z.boolean().optional(),
   question_ids: z.array(z.number().int()).optional(),
+  /** Tag ids (from study-task links); added to `tags`. A merged tag counts as the tag it was merged into. */
+  tag_ids: z.array(z.number().int().positive()).max(20).optional(),
 });
 export type SessionConfig = z.infer<typeof SessionConfig>;
 
@@ -250,6 +252,17 @@ export class Study {
 
   startSession(input: unknown) {
     const c = SessionConfig.parse(input);
+    if (c.tag_ids?.length) {
+      const paths = c.tag_ids.map((id) => {
+        let t = this.db.prepare('SELECT path, merged_into_id FROM tags WHERE id = ?').get(id) as { path: string; merged_into_id: number | null } | undefined;
+        for (let hops = 0; t?.merged_into_id && hops < 10; hops++)
+          t = this.db.prepare('SELECT path, merged_into_id FROM tags WHERE id = ?').get(t.merged_into_id) as typeof t;
+        if (!t) throw new Error(`Tag ${id} not found.`);
+        return t.path;
+      });
+      c.tags = [...new Set([...(c.tags ?? []), ...paths])];
+      delete c.tag_ids;
+    }
     const queue = this.buildQueue(c);
     const info = this.db
       .prepare('INSERT INTO sessions(mode, config, queue, started_at) VALUES(?, ?, ?, ?)')
@@ -384,6 +397,8 @@ export class Study {
         next_due: srs?.due ?? null,
         answer: q.type === 'cloze' ? { blanks: clozeParts(q.prompt) } : q.spec,
         explanation: q.explanation,
+        source: q.source,
+        citation: q.citation,
         predicted: +pPred.toFixed(3),
         leech,
       };

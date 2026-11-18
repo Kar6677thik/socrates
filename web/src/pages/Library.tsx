@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useSearch } from 'wouter';
-import { useApi, tagLabel, useTagNames, TYPES, TYPE_LABELS, api, invalidate, ago, type Question, type QType } from '../lib/api';
+import { useApi, tagLabel, useTagNames, TYPES, TYPE_LABELS, api, invalidate, ago, type Question, type QType, type TagNode } from '../lib/api';
 import { MdLine } from '../lib/md';
 import { useKeys } from '../lib/keys';
 import { Button, Chip, Badge, Empty, PageHeader, useDebounced, toast, Kbd } from '../components/ui';
@@ -14,7 +14,15 @@ export default function Library() {
   const [q, setQ] = useState(search.get('q') ?? '');
   const [types, setTypes] = useState<QType[]>([]);
   const [status, setStatus] = useState<string[]>([]);
-  const [tags, setTags] = useState<string[]>(search.get('tag') ? [search.get('tag')!] : []);
+  // ?tag= takes a path, or a tag id (the links in MCP results and study tasks), resolved once the tag list loads.
+  const tagParam = search.get('tag');
+  const tagIdParam = tagParam && /^\d+$/.test(tagParam) ? Number(tagParam) : null;
+  const [tags, setTags] = useState<string[]>(tagParam && tagIdParam === null ? [tagParam] : []);
+  const { data: tagList } = useApi<TagNode[]>(tagIdParam !== null ? '/tags' : null);
+  useEffect(() => {
+    const t = tagIdParam !== null && tagList?.find((x) => x.id === tagIdParam);
+    if (t) setTags([t.path]);
+  }, [tagList, tagIdParam]);
   const [flagged, setFlagged] = useState(search.get('flagged') === '1');
   const [page, setPage] = useState(0);
   const [cursor, setCursor] = useState(0);

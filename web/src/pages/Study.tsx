@@ -3,7 +3,7 @@ import { useLocation, Link } from 'wouter';
 import { api, useApi, invalidate, pct, fmtMs, fmtDue, tagLabel, useTagNames, TYPES, TYPE_LABELS, MODE_LABELS, type PublicQuestion, type SubmitResult, type QType, type Home, type Mode } from '../lib/api';
 import { Md, MdLine } from '../lib/md';
 import { useKeys } from '../lib/keys';
-import { Button, Chip, Kbd, Segmented, Field, Modal, toast, Card } from '../components/ui';
+import { Button, Chip, Kbd, Segmented, Field, Modal, toast, Card, SourceLine } from '../components/ui';
 import { TagInput } from '../components/TagInput';
 import { startSession } from './Home';
 import Exam from './Exam';
@@ -513,6 +513,7 @@ export function Feedback({ q, result, selfGraded, onSelfGrade, showDue = true }:
           <Md src={result.explanation} className="text-muted" />
         </div>
       )}
+      <SourceLine source={result.source} citation={result.citation} className="mt-3" />
     </div>
   );
 }

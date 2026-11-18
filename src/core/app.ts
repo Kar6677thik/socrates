@@ -4,6 +4,7 @@ import { Tags } from './tags.ts';
 import { Questions } from './questions.ts';
 import { Study } from './study.ts';
 import { Stats } from './stats.ts';
+import { Rewards } from './rewards.ts';
 import { loadHistory, countReviews, currentWeights, validWeights, DEFAULT_WEIGHTS, MIN_REVIEWS } from './optimize.ts';
 
 export type Undo =
@@ -25,6 +26,7 @@ export class App {
   questions: Questions;
   study: Study;
   stats: Stats;
+  rewards: Rewards;
 
   constructor(path = DEFAULT_DB_PATH) {
     this.dbPath = path;
@@ -33,6 +35,7 @@ export class App {
     this.questions = new Questions(this.db, this.tags);
     this.study = new Study(this.db, this.questions);
     this.stats = new Stats(this.db, this.tags);
+    this.rewards = new Rewards(this.db);
     try { backupIfDue(this.db, path); } catch { /* another process may hold the file; next run will retry */ }
   }
 

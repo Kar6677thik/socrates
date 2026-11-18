@@ -327,7 +327,7 @@ function buildItem(f: { prompt: string; answer: string; type?: string; explanati
   if (!(QTYPES as string[]).includes(type)) return { error: `Unknown type "${f.type}".` };
   const base: Item = { type, prompt: f.prompt, tags: f.tags };
   if (f.explanation) base.explanation = f.explanation;
-  if (f.source) base.source = f.source.slice(0, 200);
+  if (f.source) base.citation = f.source.slice(0, 200);
   const ans = f.answer.trim();
   switch (type) {
     case 'flashcard':
@@ -463,12 +463,12 @@ export function exportJson(db: DB) {
   const qt = new Map<number, string[]>();
   for (const r of db.prepare('SELECT question_id, tag_id FROM question_tags').all() as { question_id: number; tag_id: number }[])
     if (byId.has(r.tag_id)) qt.set(r.question_id, [...(qt.get(r.question_id) ?? []), pathOf(r.tag_id)]);
-  const qs = db.prepare(`SELECT id, type, prompt, spec, explanation, hints, difficulty, source, group_id, status, client_ref, created_at FROM questions WHERE status != 'archived' ORDER BY id`).all() as any[];
+  const qs = db.prepare(`SELECT id, type, prompt, spec, explanation, hints, difficulty, source, source_ref, group_id, status, client_ref, created_at FROM questions WHERE status != 'archived' ORDER BY id`).all() as any[];
   const questions = qs.map((q) => ({
     id: q.id, type: q.type, prompt: q.prompt, ...JSON.parse(q.spec),
     ...(q.explanation ? { explanation: q.explanation } : {}),
     ...(JSON.parse(q.hints ?? '[]').length ? { hints: JSON.parse(q.hints) } : {}),
-    difficulty: q.difficulty, ...(q.source ? { source: q.source } : {}), ...(q.group_id ? { group_id: q.group_id } : {}),
+    difficulty: q.difficulty, ...(q.source ? { citation: q.source } : {}), ...(q.source_ref ? { source: JSON.parse(q.source_ref) } : {}), ...(q.group_id ? { group_id: q.group_id } : {}),
     ...(q.client_ref ? { client_ref: q.client_ref } : {}),
     status: q.status === 'draft' ? 'draft' : 'active',
     tags: qt.get(q.id) ?? [],

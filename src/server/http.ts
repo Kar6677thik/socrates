@@ -346,6 +346,9 @@ function uiServer(app: App, cfg: Config, deps: Deps): Hono {
   });
   api.post('/backups', (c) => c.json({ file: backup(app.db, app.dbPath, 'manual') }));
 
+  // ---- Study rewards (read-only: what Hey Ann will be sent once a transport exists)
+  api.get('/rewards', (c) => c.json({ events: app.rewards.list({ limit: Math.min(200, Number(c.req.query('limit') ?? 50) || 50) }) }));
+
   // ---- Audit
   api.get('/audit', (c) => c.json(app.auditLog(Number(c.req.query('limit') ?? 100))));
   api.post('/audit/:id/revert', (c) => c.json({ ok: true, detail: app.revert(num(c.req.param('id'))) }));

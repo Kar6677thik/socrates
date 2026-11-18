@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, useApi, invalidate, ago, type Question } from '../lib/api';
 import { useKeys } from '../lib/keys';
 import { MdLine } from '../lib/md';
-import { Button, Card, Empty, PageHeader, Badge, toast } from '../components/ui';
+import { Button, Card, Empty, PageHeader, Badge, toast, SourceLine } from '../components/ui';
 import { QuestionView, QuestionForm, toDraft, toPayload, type Draft } from './Editor';
 
 /** Approve or reject questions your agent added. a = approve, x = reject, e = edit, j/k = move. */
@@ -85,7 +85,7 @@ export default function Review() {
               </div>
             </div>
             {editing ? <QuestionForm draft={editing} onChange={setEditing} /> : <QuestionView d={toDraft(q)} />}
-            {q.source && !editing && <div className="mt-4 text-[12px] text-faint">Source: {q.source}</div>}
+            {!editing && <SourceLine source={q.source} citation={q.citation} className="mt-4" />}
           </Card>
         </div>
       ) : null}

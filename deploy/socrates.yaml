@@ -76,6 +76,9 @@ spec:
             - { name: HOST, value: "0.0.0.0" }
             - { name: PORT, value: "8080" }
             - { name: SOCRATES_DATA, value: /data }
+            # The owner's time zone: the study day (and so the review schedule and Hey Ann reward days) rolls over at
+            # 04:00 local. Node's bundled ICU has the zone data; the image needs no tzdata.
+            - { name: TZ, value: Asia/Kolkata }
             # UI: exact Host allow-list (plus localhost for probes), unsafe requests must come from this origin.
             - { name: SOCRATES_PUBLIC_ORIGIN, value: "https://socrates.tailf67d61.ts.net" }
             # Links in MCP results open the tailnet UI.
