@@ -318,7 +318,7 @@ export function buildMcpServer(app: App, opts: { fallbackClient?: string; scopes
     {
       title: 'Update question',
       description:
-        'Edit a question. Pass only the fields to change (same field names as add_questions; tags replaces the full tag list). Changing the type or answer fields is a major edit that resets its review schedule. Set edit_kind to override.',
+        'Edit a question. Pass only the fields to change (same field names as `add_questions`; tags replaces the full tag list). Changing the type or answer fields is a major edit that resets its review schedule. Set edit_kind to override.',
       inputSchema: {
         id: z.number().int(),
         changes: itemSchema.partial().extend({ flagged_reason: z.null().optional().describe('Pass null to clear a flag after fixing') }),

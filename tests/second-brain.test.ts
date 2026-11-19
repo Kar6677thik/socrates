@@ -134,6 +134,19 @@ test('MCP: generate_from_source prompt and the planning/linking instructions', a
   // Every tool name in the instructions is backticked, so the Hub can rewrite it.
   const tools = (await client.listTools()).tools.map((t) => t.name);
   for (const t of tools) assert.ok(!new RegExp('(^|[^\\w`])' + t + '(?![\\w`])').test(ins), `bare tool name in instructions: ${t}`);
+  // The Hub rewrites tool descriptions and field descriptions the same way.
+  const listed = (await client.listTools()).tools;
+  const descriptions: string[] = [];
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) v.forEach(collect);
+    else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) k === 'description' && typeof x === 'string' ? descriptions.push(x) : collect(x);
+  };
+  for (const tool of listed) {
+    if (tool.description) descriptions.push(tool.description);
+    collect(tool.inputSchema);
+  }
+  for (const d of descriptions)
+    for (const t of tools) assert.ok(!new RegExp('(^|[^\\w`.])' + t + '(?![\\w`])').test(d), `bare tool name "${t}" in description: ${d.slice(0, 80)}`);
   assert.match(ins, /never build or edit them/);
 });
 
