@@ -25,10 +25,11 @@ const runBackup = () => {
 setTimeout(runBackup, 60_000).unref();
 setInterval(runBackup, 3600_000).unref();
 // Study reward events for Hey Ann: computed into the outbox, then signed and sent when SOCRATES_REWARDS_URL is set.
-const sender = cfg.rewardsUrl ? new RewardSender({ db: app.db, url: cfg.rewardsUrl, key: await loadSigningKeyFile(cfg.rewardsKeyFile!) }) : null;
+const rewardsKey = cfg.rewardsUrl ? await loadSigningKeyFile(cfg.rewardsKeyFile!) : null;
+const sender = cfg.rewardsUrl && rewardsKey ? new RewardSender({ db: app.db, url: cfg.rewardsUrl, key: rewardsKey }) : null;
 if (sender) {
   sender.start();
-  console.log(`Rewards   sending to Hey Ann (${sender.pending()} waiting)`);
+  console.log(`Rewards   sending to Hey Ann (${sender.pending()} waiting; signing key kid ${rewardsKey!.kid})`);
 }
 const runRewards = () => {
   try {
