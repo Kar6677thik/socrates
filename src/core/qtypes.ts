@@ -75,7 +75,7 @@ export const SPECS = {
     reference_solution: z.string().optional().describe('Used for grading when there are no tests (any language)'),
   }),
   hotspot: z.object({
-    image: z.string().min(1).describe('Image URL (/media/... from upload_image, or https)'),
+    image: z.string().min(1).describe('Image URL (/media/... from `upload_image`, or https)'),
     regions: z
       .array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1), w: z.number().min(0).max(1), h: z.number().min(0).max(1), label: z.string().optional() }))
       .min(1)

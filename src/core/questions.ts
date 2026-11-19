@@ -74,7 +74,7 @@ export const QuestionInput = z
   .object({
     type: z.enum(QTYPES as [QType, ...QType[]]),
     prompt: z.string().min(1).describe('Question text (markdown, LaTeX with $...$ / $$...$$, fenced code). fill_blank uses {{blank}} markers.'),
-    tags: z.array(z.string().min(1)).min(1).max(12).describe('Tag paths like "math > calculus > integrals". Must already exist (see resolve_tags / create_tags).'),
+    tags: z.array(z.string().min(1)).min(1).max(12).describe('Tag paths like "math > calculus > integrals". Must already exist (see `resolve_tags` / `create_tags`).'),
     difficulty: z.number().int().min(1).max(5).optional().describe('1 easy .. 5 hard. Default 3.'),
     explanation: z.string().optional().describe('Shown after answering (markdown)'),
     hints: z.array(z.string()).max(5).optional(),
