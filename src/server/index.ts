@@ -5,6 +5,7 @@ import { loadConfig } from './config.ts';
 import { Owner } from './owner.ts';
 import { tokenVerifier } from './oauth.ts';
 import { createServers } from './http.ts';
+import { RewardSender, loadSigningKeyFile } from './rewards-sender.ts';
 
 // Fail fast on bad configuration: a deployed instance must never start half-secured.
 const cfg = loadConfig();
@@ -23,10 +24,16 @@ const runBackup = () => {
 };
 setTimeout(runBackup, 60_000).unref();
 setInterval(runBackup, 3600_000).unref();
-// Study reward events for Hey Ann (outbox only; nothing is sent until a transport exists).
+// Study reward events for Hey Ann: computed into the outbox, then signed and sent when SOCRATES_REWARDS_URL is set.
+const sender = cfg.rewardsUrl ? new RewardSender({ db: app.db, url: cfg.rewardsUrl, key: await loadSigningKeyFile(cfg.rewardsKeyFile!) }) : null;
+if (sender) {
+  sender.start();
+  console.log(`Rewards   sending to Hey Ann (${sender.pending()} waiting)`);
+}
 const runRewards = () => {
   try {
-    app.rewards.tick();
+    const r = app.rewards.tick();
+    if (r.study || r.mastery) sender?.poke();
   } catch (e: any) {
     console.error(`[socrates] Reward computation failed: ${e.message}`);
   }
@@ -54,6 +61,7 @@ let stopping = false;
 const stop = () => {
   if (stopping) return;
   stopping = true;
+  sender?.stop();
   let open = servers.length;
   const done = () => {
     try { app.db.close(); } catch {}

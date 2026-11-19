@@ -2,7 +2,19 @@
 
 Real study in Socrates earns screen-time minutes in Hey Ann's wallet. This document is the **Socrates side**: what counts as study, how it's measured, and the events Socrates emits. Hey Ann's `docs/REWARDS.md` covers pricing, rates and wallet caps. The rules were agreed between the two app threads on 18 Nov 2026 and **approved by the owner**, together with Hey Ann's pricing (Hey Ann `docs/REWARDS.md` §10).
 
-**Status:** Socrates computes the events and keeps them in an outbox (`reward_events`), visible at `GET /api/rewards`. Nothing is sent yet. The transport (a signed call or an event outbox using Orbit Identity client credentials) comes from Orbit's contract.
+**Status:** Socrates computes the events into an outbox (`reward_events`, visible at `GET /api/rewards`) and, when `SOCRATES_REWARDS_URL` is set, ships them to Hey Ann (Orbit Hub M4, orbit-cloud `docs/17` §7).
+
+## Delivery
+
+`src/server/rewards-sender.ts`.
+
+- **One event per request:** `POST` with `Content-Type: application/jose`. The body is a compact JWS signed with Socrates' ES256 key (`SOCRATES_REWARDS_KEY_FILE`, PKCS#8 P-256).
+  - Header: `alg: ES256`, `typ: reward+jwt`, `kid` = the RFC 7638 thumbprint of the public key.
+  - Claims: `iss: "socrates"`, `aud: "heyann-rewards"`, `jti` = `event_id`, `iat`, `exp` = `iat` + 300 s, and `event` = the stored payload, unchanged.
+- **Signed afresh on every attempt, over the identical event:** a retry never carries an expired token. A retry after a lost 200 is a duplicate that Hey Ann recognises by `jti`, so it never pays twice.
+- **Order:** oldest first, one in flight, 10 s timeout.
+- **Delivered only on 200.** Anything else backs off exponentially: 30 s, doubling, capped at 1 h, with ±20% jitter. It never gives up, so events flow again once a fix ships.
+- **Logs:** the event id and status only, never the token or the key.
 
 ## The principle
 

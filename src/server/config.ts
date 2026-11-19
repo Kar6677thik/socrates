@@ -33,6 +33,10 @@ export interface Config {
    * NetworkPolicy is what limits that network to the Hub pod. The UI listener never uses this list.
    */
   mcpTrustedProxies: string[];
+  /** Hey Ann's reward intake (Hub M4). Unset: rewards stay in the outbox and nothing is sent. */
+  rewardsUrl: string | null;
+  /** PKCS#8 P-256 key that signs reward events; required with rewardsUrl. */
+  rewardsKeyFile: string | null;
   credentialFile: string | null;
   totpFile: string | null;
   /** Separate MCP listener port (deployed: required for MCP). Null: MCP on the UI listener with the local token. */
@@ -105,6 +109,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const mcpTrustedProxies = env.SOCRATES_MCP_TRUSTED_PROXY ? list(env.SOCRATES_MCP_TRUSTED_PROXY) : trustedProxies;
   for (const p of mcpTrustedProxies) if (!validProxy(p)) throw new Error(`SOCRATES_MCP_TRUSTED_PROXY: "${p}" is not an IP address or CIDR`);
   if (env.SOCRATES_MCP_TRUSTED_PROXY && !oauth) throw new Error('SOCRATES_MCP_TRUSTED_PROXY only applies to the OAuth MCP listener.');
+  const rewardsUrl = env.SOCRATES_REWARDS_URL || null;
+  const rewardsKeyFile = env.SOCRATES_REWARDS_KEY_FILE || null;
+  if (rewardsUrl) {
+    let u: URL | null = null;
+    try { u = new URL(rewardsUrl); } catch { /* reported below */ }
+    if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:') || u.username || u.password || u.hash)
+      throw new Error('SOCRATES_REWARDS_URL must be an absolute http(s) URL.');
+    if (!rewardsKeyFile) throw new Error('SOCRATES_REWARDS_URL needs SOCRATES_REWARDS_KEY_FILE (the signing key).');
+  } else if (rewardsKeyFile) throw new Error('SOCRATES_REWARDS_KEY_FILE is set but SOCRATES_REWARDS_URL is not.');
   if ((deployed || oauth) && trustedProxies.length === 0)
     throw new Error('Set SOCRATES_TRUSTED_PROXY to the address of the HTTPS proxy (tailscale serve / cloudflared).');
 
@@ -116,6 +129,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedHosts,
     trustedProxies,
     mcpTrustedProxies,
+    rewardsUrl,
+    rewardsKeyFile,
     credentialFile,
     totpFile,
     mcpPort,

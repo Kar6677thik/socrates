@@ -7,6 +7,7 @@
 # Provisioned separately, never in this file:
 #   Secret    socrates-owner   keys "verifier" and "totp" (scripts/credentials.ts or Orbit.Credentials; not Orbit's own)
 #   ConfigMap socrates-jwks    key "jwks.json": Orbit Identity's public keys (curl https://auth.karthiksurkanti.in/.well-known/jwks)
+#   Secret socrates-rewards-key  key "signing-key.pem": PKCS#8 P-256 private key that signs reward events (Hub M4)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -100,6 +101,10 @@ spec:
             # Orbit Identity's owner subject (an identifier, not a secret).
             - { name: SOCRATES_OAUTH_ALLOWED_SUBJECTS, value: "7356e980-f25e-4c82-84f1-b00c5f9783f0" }
             - { name: SOCRATES_OAUTH_JWKS_FILE, value: /run/socrates/jwks/jwks.json }
+            # Study rewards (Hub M4): signed events to Hey Ann's intake, by ClusterIP (no DNS). The key's public half
+            # is in Hey Ann's ConfigMap; kid is its RFC 7638 thumbprint, computed at startup.
+            - { name: SOCRATES_REWARDS_URL, value: "http://10.43.0.106:8082/internal/rewards" }
+            - { name: SOCRATES_REWARDS_KEY_FILE, value: /run/socrates/rewards/signing-key.pem }
           resources:
             # The embedding model (~90 MB resident) plus up to two code-runner processes (64 MB heap each).
             requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 32Mi }
@@ -118,6 +123,7 @@ spec:
             - { name: data, mountPath: /data }
             - { name: owner, mountPath: /run/socrates/owner, readOnly: true }
             - { name: jwks, mountPath: /run/socrates/jwks, readOnly: true }
+            - { name: rewards-key, mountPath: /run/socrates/rewards, readOnly: true }
             - { name: temporary, mountPath: /tmp }
       volumes:
         - name: data
@@ -126,6 +132,10 @@ spec:
           secret: { secretName: socrates-owner, defaultMode: 0440 }
         - name: jwks
           configMap: { name: socrates-jwks, defaultMode: 0444 }
+        # Group-readable (fsGroup 1654), not world-readable. The code runner's child processes can't read it either:
+        # they run under Node's permission model with no file access.
+        - name: rewards-key
+          secret: { secretName: socrates-rewards-key, defaultMode: 0440 }
         # Database exports and Anki imports unpack here; disk-backed so they don't count against memory.
         - name: temporary
           emptyDir: { sizeLimit: 384Mi }
@@ -155,8 +165,9 @@ spec:
   policyTypes: [Ingress, Egress]
 ---
 # Policies see post-kube-proxy addresses: tailscale serve, cloudflared and kubelet probes all arrive from the node's
-# cni0 address; Orbit Hub arrives as its own pod. No egress at all: the model is in the image, the JWKS is a mounted file, and submitted code must
-# not reach any network.
+# cni0 address; Orbit Hub arrives as its own pod. Almost no egress: the model is in the image, the JWKS is a mounted file, and submitted code must
+# not reach any network. The one exception is Hey Ann's reward intake (Hub M4), and only that pod and port: a reward
+# needs Socrates' signature, which submitted code can't produce (no file access, empty environment).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -178,4 +189,9 @@ spec:
           podSelector: { matchLabels: { app.kubernetes.io/name: orbit-hub } }
       ports:
         - { protocol: TCP, port: 8081 }
-  egress: []
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: heyann } }
+          podSelector: { matchLabels: { app: heyann } }
+      ports:
+        - { protocol: TCP, port: 8082 }

@@ -172,6 +172,7 @@ Build, import and apply with the new digest (steps 1 and 3). `Recreate` stops th
 | `SOCRATES_CREDENTIAL_FILE`, `SOCRATES_TOTP_FILE` | Owner login files. |
 | `SOCRATES_MCP_PORT`, `SOCRATES_MCP_PUBLIC_ORIGIN`, `SOCRATES_MCP_ALLOWED_ORIGINS` | The OAuth MCP listener. |
 | `SOCRATES_OAUTH_ISSUER`, `SOCRATES_OAUTH_RESOURCE`, `SOCRATES_OAUTH_ALLOWED_SUBJECTS`, `SOCRATES_OAUTH_JWKS_FILE` | Token checks. `SOCRATES_OAUTH_ALLOWED_CLIENTS` optionally limits client ids. |
+| `SOCRATES_REWARDS_URL`, `SOCRATES_REWARDS_KEY_FILE` | Hey Ann's reward intake and Socrates' signing key (PKCS#8 P-256). Unset: rewards stay in the outbox. See `docs/REWARDS.md`. |
 | `SOCRATES_DATA`, `SOCRATES_MODELS`, `SOCRATES_MODELS_OFFLINE` | Data directory; model directory; `1` = never download the model. |
 | `SOCRATES_URL` | Origin for the openable links in MCP results and study tasks (defaults to `SOCRATES_PUBLIC_ORIGIN`). |
 | `TZ` | The owner's time zone. The study day rolls over at 04:00 in it; without it the pod uses UTC. |
