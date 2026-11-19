@@ -57,6 +57,32 @@ export function proxyMatcher(entries: string[]): (ip: string) => boolean {
   };
 }
 
+export const MCP_LIMITS = { burst: 60, perMinute: 120, anonBurst: 10, anonPerMinute: 30 } as const;
+
+/**
+ * Token bucket per key: up to `burst` requests at once, refilled at `perMinute`. Returns 0 when the request may go
+ * ahead, else the seconds to wait (for Retry-After).
+ */
+export function rateLimiter(burst: number, perMinute: number, now: () => number = Date.now) {
+  const buckets = new Map<string, { tokens: number; at: number }>();
+  return (key: string): number => {
+    const t = now();
+    let b = buckets.get(key);
+    if (!b) {
+      if (buckets.size > 1000) buckets.clear();
+      b = { tokens: burst, at: t };
+      buckets.set(key, b);
+    }
+    b.tokens = Math.min(burst, b.tokens + ((t - b.at) / 60_000) * perMinute);
+    b.at = t;
+    if (b.tokens >= 1) {
+      b.tokens -= 1;
+      return 0;
+    }
+    return Math.max(1, Math.ceil(((1 - b.tokens) * 60_000) / perMinute / 1000));
+  };
+}
+
 /** HTTPS as seen by the client: X-Forwarded-Proto counts only from a trusted proxy. */
 function viaHttps(c: Context, trusted: (ip: string) => boolean): boolean {
   if (!trusted(peer(c))) return false;
@@ -421,17 +447,15 @@ function mcpServer(app: App, cfg: Config, verify: (token: string | undefined) =>
   const browserOrigins = new Set([origin, ...cfg.mcpAllowedOrigins]);
   const mcpTrusted = proxyMatcher(cfg.mcpTrustedProxies);
   const root = new Hono();
-  const PER_MINUTE = 90;
-  const windows = new Map<string, { start: number; n: number }>();
-  const limited = (key: string) => {
-    const t = Date.now();
-    const w = windows.get(key);
-    if (!w || t - w.start >= 60_000) {
-      if (windows.size > 1000) windows.clear();
-      windows.set(key, { start: t, n: 1 });
-      return false;
-    }
-    return ++w.n > PER_MINUTE;
+  // Verified callers: per owner + delegating party (sub, act.sub), so Orbit Hub sessions and a direct connector have
+  // separate budgets, and a burst of Hub sessions opening at once (initialize, tools/list, prompts/list each) fits.
+  const callerLimit = rateLimiter(MCP_LIMITS.burst, MCP_LIMITS.perMinute);
+  // Requests without a valid token: per peer address. Behind the tunnel every internet client shares the node
+  // address, which is fine for one owner (a client sends one unauthenticated request before it signs in).
+  const anonLimit = rateLimiter(MCP_LIMITS.anonBurst, MCP_LIMITS.anonPerMinute);
+  const tooMany = (c: Context, retryAfter: number) => {
+    c.header('Retry-After', String(retryAfter));
+    return c.json({ error: 'Too many requests.' }, 429);
   };
 
   root.use('*', async (c, next) => {
@@ -452,10 +476,19 @@ function mcpServer(app: App, cfg: Config, verify: (token: string | undefined) =>
   root.get('/.well-known/oauth-protected-resource', metadata);
   root.get('/.well-known/oauth-protected-resource/mcp', metadata);
 
-  root.all('/mcp', bodyLimit({ maxSize: 1024 * 1024, onError: (c) => c.json({ error: 'Request too large.' }, 413) }), async (c) => {
+  // Stateless server: no server-sent event stream and no sessions. The MCP spec lets a server answer 405 to GET (and
+  // DELETE), which tells clients not to hold a stream open; answering 200 left an idle stream per client.
+  root.on(['GET', 'DELETE'], '/mcp', (c) => {
+    c.header('Allow', 'POST');
+    return c.json({ error: 'This server answers POST only (no event stream, no sessions).' }, 405);
+  });
+
+  root.post('/mcp', bodyLimit({ maxSize: 1024 * 1024, onError: (c) => c.json({ error: 'Request too large.' }, 413) }), async (c) => {
     const m = /^Bearer\s+(\S+)$/i.exec(c.req.header('authorization') ?? '');
     const r = await verify(m?.[1]);
     if (!r.ok) {
+      const wait = anonLimit(peer(c) || 'unknown');
+      if (wait) return tooMany(c, wait);
       c.header('WWW-Authenticate', challenge(origin));
       return c.json({ error: 'A valid Orbit Identity access token is required.' }, 401);
     }
@@ -463,7 +496,8 @@ function mcpServer(app: App, cfg: Config, verify: (token: string | undefined) =>
       c.header('WWW-Authenticate', `${challenge(origin)}, error="insufficient_scope"`);
       return c.json({ error: 'The token has no Socrates scopes.' }, 403);
     }
-    if (limited(r.sub)) return c.json({ error: 'Too many requests.' }, 429);
+    const wait = callerLimit(`${r.sub}|${r.via ?? ''}`);
+    if (wait) return tooMany(c, wait);
     return handleMcp(app, c.req.raw, r.scopes, r.via);
   });
 

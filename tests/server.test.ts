@@ -9,7 +9,7 @@ import { App } from '../src/core/app.ts';
 import { loadConfig } from '../src/server/config.ts';
 import { Owner, makeVerifier, toBase32, totpCode, totpStep, parseVerifier, verifyPassword } from '../src/server/owner.ts';
 import { tokenVerifier, loadJwks } from '../src/server/oauth.ts';
-import { createServers } from '../src/server/http.ts';
+import { createServers, rateLimiter, MCP_LIMITS } from '../src/server/http.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'socrates-server-test-'));
 const UI = 'https://socrates.example.ts.net';
@@ -290,4 +290,56 @@ test('Orbit Hub in-cluster (M2): pod-network peers trusted on the MCP listener o
     assert.throws(() => loadConfig({ ...deployedEnv, SOCRATES_MCP_TRUSTED_PROXY: bad }), /SOCRATES_MCP_TRUSTED_PROXY/, bad);
   const { SOCRATES_OAUTH_ISSUER, SOCRATES_MCP_PORT, ...noOauth } = deployedEnv;
   assert.throws(() => loadConfig({ ...noOauth, SOCRATES_MCP_TRUSTED_PROXY: '10.42.0.0/16' }), /only applies to the OAuth MCP listener/);
+});
+
+test('MCP limits: Hub bursts fit, budgets per owner + delegating party, anonymous traffic limited per address, no idle streams', async () => {
+  // The limiter itself: burst, then refill at the steady rate, with a Retry-After hint.
+  let clock = 0;
+  const lim = rateLimiter(3, 60, () => clock);
+  assert.deepEqual([lim('k'), lim('k'), lim('k')], [0, 0, 0]);
+  assert.equal(lim('k'), 1, 'empty bucket: retry after about a second');
+  assert.equal(lim('other'), 0, 'keys are independent');
+  clock += 1000;
+  assert.equal(lim('k'), 0, 'one token back after a second at 60/min');
+
+  const cfg = loadConfig({ ...deployedEnv, SOCRATES_MCP_TRUSTED_PROXY: '10.42.0.1,10.42.0.0/16' });
+  const app = new App(':memory:');
+  const s = createServers(app, cfg, { owner: Owner.fromFiles(credentialFile, totpFile), verifyToken: tokenVerifier(cfg.oauth!) });
+  const send = (tok: string | null, body: string, peerIp = '10.42.0.57', method = 'POST') =>
+    s.mcp!.request('http://10.43.0.105:8081/mcp', {
+      method, body: method === 'POST' ? body : undefined,
+      headers: { host: 'socrates-mcp.example.com', 'x-forwarded-proto': 'https', 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(tok ? { authorization: `Bearer ${tok}` } : {}) },
+    }, { remoteAddress: peerIp });
+  const init = rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orbit-hub', version: '1' } });
+  const hub = await token({ client_id: 'orbit-hub', act: { sub: 'orbit-hub' } });
+
+  // Orbit's measurement: several Hub sessions opening at once, each initialize + tools/list + prompts/list.
+  const burst = [];
+  for (let i = 0; i < 12; i++) burst.push(send(hub, init), send(hub, rpc('tools/list')), send(hub, rpc('prompts/list')));
+  const statuses = (await Promise.all(burst)).map((r) => r.status);
+  assert.ok(statuses.every((st) => st === 200), `12 sessions at once all answered: ${[...new Set(statuses)]}`);
+
+  // Exhaust the Hub's budget; a direct connector (no act) still has its own.
+  let last: Response | undefined;
+  for (let i = 0; i < MCP_LIMITS.burst; i++) last = await send(hub, rpc('tools/list'));
+  assert.equal(last!.status, 429);
+  assert.ok(Number(last!.headers.get('retry-after')) >= 1);
+  assert.equal((await send(await token({}), rpc('tools/list'))).status, 200, 'separate budget without act');
+
+  // No server-sent event stream: GET and DELETE are 405 and never left open.
+  for (const method of ['GET', 'DELETE']) {
+    const r = await send(hub, '', '10.42.0.57', method);
+    assert.equal(r.status, 405, method);
+    assert.equal(r.headers.get('allow'), 'POST');
+  }
+
+  // Requests without a valid token: 401 with the challenge, then 429 per address.
+  const anon = [];
+  for (let i = 0; i < MCP_LIMITS.anonBurst; i++) anon.push((await send(null, init, '10.42.0.1')).status);
+  assert.ok(anon.every((st) => st === 401));
+  assert.equal((await send(null, init, '10.42.0.1')).status, 429);
+  assert.equal((await send('garbage', init, '10.42.0.1')).status, 429, 'bad tokens count too');
+  assert.equal((await send(null, init, '10.42.0.99')).status, 401, 'another address has its own allowance');
+  assert.equal((await send(hub, rpc('tools/list'), '10.42.0.1')).status, 429, 'the Hub budget is still spent');
+  assert.equal((await send(await token({ act: { sub: 'someone' } }), rpc('tools/list'), '10.42.0.1')).status, 200, 'valid tokens are not held back by the anonymous limit');
 });
