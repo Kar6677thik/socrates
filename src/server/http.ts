@@ -74,10 +74,10 @@ function health(r: Hono, app: App) {
 }
 
 /** One stateless MCP server per request. scopes undefined = fully trusted local caller. */
-async function handleMcp(app: App, req: Request, scopes?: ReadonlySet<string>) {
+async function handleMcp(app: App, req: Request, scopes?: ReadonlySet<string>, via?: string | null) {
   // e.g. "openai-mcp/1.0" -> "openai-mcp", "claude-code/2.1" -> "claude-code"
   const ua = (req.headers.get('user-agent') ?? '').split(/[\s/]/)[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
-  const server = buildMcpServer(app, { fallbackClient: ua || 'http', scopes });
+  const server = buildMcpServer(app, { fallbackClient: ua || 'http', scopes, via });
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(req);
@@ -446,7 +446,7 @@ function mcpServer(app: App, cfg: Config, verify: (token: string | undefined) =>
       return c.json({ error: 'The token has no Socrates scopes.' }, 403);
     }
     if (limited(r.sub)) return c.json({ error: 'Too many requests.' }, 429);
-    return handleMcp(app, c.req.raw, r.scopes);
+    return handleMcp(app, c.req.raw, r.scopes, r.via);
   });
 
   root.all('*', (c) => c.json({ error: 'Not found' }, 404));

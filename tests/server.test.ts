@@ -232,3 +232,20 @@ test('local mode: unchanged; localhost only, no login, /mcp with the local token
   const r = await ui.request('http://localhost:4321/mcp', { method: 'POST', body: rpc('tools/list'), headers: { host: 'localhost:4321', ...mcpHeaders(tok) } }, { remoteAddress: '127.0.0.1' });
   assert.equal(r.status, 200);
 });
+
+test('Orbit Hub: delegated tokens (act) work and are audited as the Hub; the Hub audience is refused', async () => {
+  const { app, mcp } = deployed();
+  app.tags.create('physics > optics');
+  const call = (tok: string, body: string) => mcp('/mcp', { method: 'POST', body, headers: mcpHeaders(tok) });
+  // RFC 8693 exchange result: our audience, owner subject, the Hub named in `act`, a subset of our scopes.
+  const delegated = await token({ act: { sub: 'https://hub.example.com/client' }, scope: 'socrates.read socrates.write' });
+  const r = await call(delegated, rpc('tools/call', { name: 'add_questions', arguments: { items: [{ type: 'true_false', prompt: 'Light bends when it enters glass', correct: true, tags: ['physics > optics'] }] } }));
+  assert.equal(r.status, 200);
+  const res = await r.json();
+  assert.ok(!res.result.isError, JSON.stringify(res));
+  const actor = (app.db.prepare('SELECT actor FROM audit_log ORDER BY id DESC LIMIT 1').get() as { actor: string }).actor;
+  assert.match(actor, /^agent:hub\//, 'Agent activity shows the change came through the Hub');
+  // A token minted for the Hub itself must never be accepted here.
+  assert.equal((await call(await token({ aud: 'https://hub.example.com/mcp' }), rpc('tools/list'))).status, 401);
+  assert.equal((await call(await token({ aud: ['https://hub.example.com/mcp'] }), rpc('tools/list'))).status, 401);
+});

@@ -24,7 +24,9 @@ export function loadJwks(file: string): JSONWebKeySet {
   return jwks;
 }
 
-export type TokenCheck = { ok: true; sub: string; scopes: Set<string>; client: string | null } | { ok: false; reason: string };
+export type TokenCheck =
+  | { ok: true; sub: string; scopes: Set<string>; client: string | null; via: string | null }
+  | { ok: false; reason: string };
 
 export function tokenVerifier(cfg: OAuthConfig, jwks: JSONWebKeySet = loadJwks(cfg.jwksFile)) {
   const keySet = createLocalJWKSet(jwks);
@@ -51,7 +53,10 @@ export function tokenVerifier(cfg: OAuthConfig, jwks: JSONWebKeySet = loadJwks(c
     const client = typeof payload.client_id === 'string' ? payload.client_id : typeof payload.azp === 'string' ? payload.azp : null;
     if (cfg.allowedClients.length && (!client || !cfg.allowedClients.includes(client))) return { ok: false, reason: 'client not allowed' };
     const raw = [payload.scope, payload.scp].flatMap((v) => (Array.isArray(v) ? v : typeof v === 'string' ? v.split(' ') : []));
-    return { ok: true, sub, scopes: new Set(raw.map(String).map((s) => s.trim()).filter(Boolean)), client };
+    // RFC 8693 delegation: Orbit Hub exchanges its token for one aimed at this resource and names itself in `act`.
+    const act = payload.act as { sub?: unknown } | undefined;
+    const via = act && typeof act.sub === 'string' && act.sub ? act.sub : null;
+    return { ok: true, sub, scopes: new Set(raw.map(String).map((s) => s.trim()).filter(Boolean)), client, via };
   };
 }
 

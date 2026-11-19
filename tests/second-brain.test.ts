@@ -126,9 +126,14 @@ test('MCP: generate_from_source prompt and the planning/linking instructions', a
   assert.ok(prompts.includes('generate_from_source'));
   const p = await client.getPrompt({ name: 'generate_from_source', arguments: { source: SLATE.id } });
   const text = (p.messages[0].content as any).text as string;
-  for (const step of ['read_note', 'check_duplicates', 'resolve_tags', 'source', 'client_ref']) assert.ok(text.includes(step), step);
+  // Tool names in backticks, cross-app ones as `app.tool`: Orbit Hub rewrites exactly these to its own names.
+  for (const step of ['`slate.read_note`', '`check_duplicates`', '`resolve_tags`', '`add_questions`', '`create_tags`', 'source', 'client_ref']) assert.ok(text.includes(step), step);
+  assert.ok(!text.includes('get_tag_tree'), 'uses only tools in the Hub core');
   const ins = client.getInstructions() ?? '';
-  assert.match(ins, /When Hey Ann tools are present, offer to schedule them with add_cards/);
+  assert.match(ins, /When Hey Ann tools are present, offer to schedule them with `heyann\.add_cards`/);
+  // Every tool name in the instructions is backticked, so the Hub can rewrite it.
+  const tools = (await client.listTools()).tools.map((t) => t.name);
+  for (const t of tools) assert.ok(!new RegExp('(^|[^\\w`])' + t + '(?![\\w`])').test(ins), `bare tool name in instructions: ${t}`);
   assert.match(ins, /never build or edit them/);
 });
 
