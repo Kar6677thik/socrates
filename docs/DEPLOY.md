@@ -168,6 +168,7 @@ Build, import and apply with the new digest (steps 1 and 3). `Recreate` stops th
 | `SOCRATES_PUBLIC_ORIGIN` | UI origin. Turns on deployed mode: login required, HTTPS required, no local-token MCP. |
 | `SOCRATES_ALLOWED_HOSTS` | Extra exact Host values for the UI (comma-separated). localhost is always allowed (probes). |
 | `SOCRATES_TRUSTED_PROXY` | Addresses whose `X-Forwarded-Proto` is believed. |
+| `SOCRATES_MCP_TRUSTED_PROXY` | MCP listener only: IPs or CIDRs whose `X-Forwarded-Proto` is believed (defaults to `SOCRATES_TRUSTED_PROXY`). Used for Orbit Hub's in-cluster calls; pair a CIDR with a NetworkPolicy that admits only the Hub. |
 | `SOCRATES_CREDENTIAL_FILE`, `SOCRATES_TOTP_FILE` | Owner login files. |
 | `SOCRATES_MCP_PORT`, `SOCRATES_MCP_PUBLIC_ORIGIN`, `SOCRATES_MCP_ALLOWED_ORIGINS` | The OAuth MCP listener. |
 | `SOCRATES_OAUTH_ISSUER`, `SOCRATES_OAUTH_RESOURCE`, `SOCRATES_OAUTH_ALLOWED_SUBJECTS`, `SOCRATES_OAUTH_JWKS_FILE` | Token checks. `SOCRATES_OAUTH_ALLOWED_CLIENTS` optionally limits client ids. |

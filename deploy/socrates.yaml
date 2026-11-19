@@ -85,6 +85,10 @@ spec:
             - { name: SOCRATES_URL, value: "https://socrates.tailf67d61.ts.net" }
             # tailscale serve and cloudflared both run on the node and reach the pod from its cni0 address.
             - { name: SOCRATES_TRUSTED_PROXY, value: "10.42.0.1" }
+            # MCP listener only: Orbit Hub calls :8081 in-cluster from a pod IP that changes on restart, so its
+            # X-Forwarded-Proto is trusted from the pod network. Safe only because the NetworkPolicy below admits
+            # nothing on 8081 from that network except the Hub pod. The UI listener keeps the exact node IP.
+            - { name: SOCRATES_MCP_TRUSTED_PROXY, value: "10.42.0.1,10.42.0.0/16" }
             - { name: SOCRATES_CREDENTIAL_FILE, value: /run/socrates/owner/verifier }
             - { name: SOCRATES_TOTP_FILE, value: /run/socrates/owner/totp }
             # MCP: its own listener, Orbit Identity access tokens only (RFC 9068, ES256), owner subject only.
@@ -151,7 +155,7 @@ spec:
   policyTypes: [Ingress, Egress]
 ---
 # Policies see post-kube-proxy addresses: tailscale serve, cloudflared and kubelet probes all arrive from the node's
-# cni0 address. No egress at all: the model is in the image, the JWKS is a mounted file, and submitted code must
+# cni0 address; Orbit Hub arrives as its own pod. No egress at all: the model is in the image, the JWKS is a mounted file, and submitted code must
 # not reach any network.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -167,5 +171,11 @@ spec:
         - ipBlock: { cidr: 10.42.0.1/32 }
       ports:
         - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8081 }
+    # Orbit Hub (M2): the MCP listener only, from the Hub pod only (namespace and pod label together).
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: hub } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: orbit-hub } }
+      ports:
         - { protocol: TCP, port: 8081 }
   egress: []
