@@ -1,4 +1,5 @@
 // Runtime configuration from environment variables, checked once at startup.
+import { isIP } from 'node:net';
 //
 // Local (default): one listener on 127.0.0.1:4321, no login, localhost Host headers only, and /mcp with the
 // local bearer token from Settings.
@@ -26,6 +27,12 @@ export interface Config {
   /** Exact Host header values the UI listener accepts (localhost variants are always accepted). */
   allowedHosts: string[];
   trustedProxies: string[];
+  /**
+   * Proxies whose X-Forwarded-Proto the MCP listener believes: exact IPs or CIDRs. Defaults to trustedProxies.
+   * Orbit Hub calls in-cluster from a pod IP that changes on restart, so this may be the pod network; the
+   * NetworkPolicy is what limits that network to the Hub pod. The UI listener never uses this list.
+   */
+  mcpTrustedProxies: string[];
   credentialFile: string | null;
   totpFile: string | null;
   /** Separate MCP listener port (deployed: required for MCP). Null: MCP on the UI listener with the local token. */
@@ -95,6 +102,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const trustedProxies = list(env.SOCRATES_TRUSTED_PROXY);
   for (const p of trustedProxies) if (!/^[0-9a-f.:]+$/i.test(p)) throw new Error(`SOCRATES_TRUSTED_PROXY: "${p}" is not an IP address`);
+  const mcpTrustedProxies = env.SOCRATES_MCP_TRUSTED_PROXY ? list(env.SOCRATES_MCP_TRUSTED_PROXY) : trustedProxies;
+  for (const p of mcpTrustedProxies) if (!validProxy(p)) throw new Error(`SOCRATES_MCP_TRUSTED_PROXY: "${p}" is not an IP address or CIDR`);
+  if (env.SOCRATES_MCP_TRUSTED_PROXY && !oauth) throw new Error('SOCRATES_MCP_TRUSTED_PROXY only applies to the OAuth MCP listener.');
   if ((deployed || oauth) && trustedProxies.length === 0)
     throw new Error('Set SOCRATES_TRUSTED_PROXY to the address of the HTTPS proxy (tailscale serve / cloudflared).');
 
@@ -105,6 +115,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicOrigin,
     allowedHosts,
     trustedProxies,
+    mcpTrustedProxies,
     credentialFile,
     totpFile,
     mcpPort,
@@ -112,4 +123,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mcpAllowedOrigins,
     oauth,
   };
+}
+
+/** An exact IP, or a CIDR with a sensible prefix (never 0.0.0.0/0: at least /8 for IPv4, /16 for IPv6). */
+export function validProxy(v: string): boolean {
+  const [ip, bits, extra] = v.split('/');
+  const kind = isIP(ip);
+  if (!kind || extra !== undefined) return false;
+  if (bits === undefined) return true;
+  if (!/^\d{1,3}$/.test(bits)) return false;
+  const n = Number(bits);
+  return kind === 4 ? n >= 8 && n <= 32 : n >= 16 && n <= 128;
 }

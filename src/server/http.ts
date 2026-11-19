@@ -12,6 +12,7 @@ import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { tmpdir } from 'node:os';
+import { BlockList, isIP } from 'node:net';
 import type { App } from '../core/app.ts';
 import { backup } from '../core/db.ts';
 import { buildMcpServer } from '../mcp/server.ts';
@@ -41,9 +42,24 @@ function peer(c: Context): string {
   return (env?.incoming?.socket?.remoteAddress ?? env?.remoteAddress ?? '').replace(/^::ffff:/, '');
 }
 
+/** Exact IPs and CIDRs as one matcher. */
+export function proxyMatcher(entries: string[]): (ip: string) => boolean {
+  const list = new BlockList();
+  for (const e of entries) {
+    const [ip, bits] = e.split('/');
+    const type = isIP(ip) === 6 ? 'ipv6' : 'ipv4';
+    if (bits === undefined) list.addAddress(ip, type);
+    else list.addSubnet(ip, Number(bits), type);
+  }
+  return (ip) => {
+    const kind = isIP(ip);
+    return kind !== 0 && list.check(ip, kind === 6 ? 'ipv6' : 'ipv4');
+  };
+}
+
 /** HTTPS as seen by the client: X-Forwarded-Proto counts only from a trusted proxy. */
-function viaHttps(c: Context, cfg: Config): boolean {
-  if (!cfg.trustedProxies.includes(peer(c))) return false;
+function viaHttps(c: Context, trusted: (ip: string) => boolean): boolean {
+  if (!trusted(peer(c))) return false;
   return (c.req.header('x-forwarded-proto') ?? '').split(',')[0].trim().toLowerCase() === 'https';
 }
 
@@ -92,6 +108,7 @@ export function createServers(app: App, cfg: Config, deps: Deps): { ui: Hono; mc
 function uiServer(app: App, cfg: Config, deps: Deps): Hono {
   const { owner } = deps;
   const localMcp = !cfg.deployed && !cfg.oauth;
+  const uiTrusted = (ip: string) => cfg.trustedProxies.includes(ip);
   const uiOrigins = new Set([...(cfg.publicOrigin ? [cfg.publicOrigin] : []), ...(cfg.deployed ? [] : [`http://localhost:${cfg.port}`, `http://127.0.0.1:${cfg.port}`, 'http://localhost:5173', 'http://127.0.0.1:5173'])]);
   const root = new Hono();
 
@@ -105,7 +122,7 @@ function uiServer(app: App, cfg: Config, deps: Deps): Hono {
   // Exact Host only (DNS rebinding, stray tunnels), then HTTPS when deployed.
   root.use('*', async (c, next) => {
     if (!hostAllowed(c.req.header('host'), cfg.allowedHosts)) return c.json({ error: 'Unknown host.' }, 403);
-    if (cfg.deployed && !viaHttps(c, cfg)) return c.json({ error: 'HTTPS is required.' }, 403);
+    if (cfg.deployed && !viaHttps(c, uiTrusted)) return c.json({ error: 'HTTPS is required.' }, 403);
     await next();
   });
 
@@ -402,6 +419,7 @@ function mcpServer(app: App, cfg: Config, verify: (token: string | undefined) =>
   const origin = cfg.mcpPublicOrigin!;
   const hosts = [new URL(origin).host];
   const browserOrigins = new Set([origin, ...cfg.mcpAllowedOrigins]);
+  const mcpTrusted = proxyMatcher(cfg.mcpTrustedProxies);
   const root = new Hono();
   const PER_MINUTE = 90;
   const windows = new Map<string, { start: number; n: number }>();
@@ -424,7 +442,7 @@ function mcpServer(app: App, cfg: Config, verify: (token: string | undefined) =>
   health(root, app);
   root.use('*', async (c, next) => {
     if (!hostAllowed(c.req.header('host'), hosts)) return c.json({ error: 'Unknown host.' }, 403);
-    if (!viaHttps(c, cfg)) return c.json({ error: 'HTTPS is required.' }, 403);
+    if (!viaHttps(c, mcpTrusted)) return c.json({ error: 'HTTPS is required.' }, 403);
     const o = c.req.header('origin');
     if (o !== undefined && !browserOrigins.has(o)) return c.json({ error: 'The request origin is not allowed.' }, 403);
     await next();

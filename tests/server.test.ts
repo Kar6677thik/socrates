@@ -249,3 +249,45 @@ test('Orbit Hub: delegated tokens (act) work and are audited as the Hub; the Hub
   assert.equal((await call(await token({ aud: 'https://hub.example.com/mcp' }), rpc('tools/list'))).status, 401);
   assert.equal((await call(await token({ aud: ['https://hub.example.com/mcp'] }), rpc('tools/list'))).status, 401);
 });
+
+test('Orbit Hub in-cluster (M2): pod-network peers trusted on the MCP listener only', async () => {
+  const cfg = loadConfig({ ...deployedEnv, SOCRATES_MCP_TRUSTED_PROXY: '10.42.0.1,10.42.0.0/16' });
+  const app = new App(':memory:');
+  app.tags.create('chemistry > bonds');
+  const s = createServers(app, cfg, { owner: Owner.fromFiles(credentialFile, totpFile), verifyToken: tokenVerifier(cfg.oauth!) });
+  // Exactly what the Hub sends: plain HTTP to the ClusterIP, forwarded headers, an exchanged token, no Origin.
+  const hubToken = await token({ client_id: 'orbit-hub', act: { sub: 'orbit-hub' } });
+  const hubHeaders = {
+    host: 'socrates-mcp.example.com', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'socrates-mcp.example.com',
+    authorization: `Bearer ${hubToken}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'user-agent': 'orbit-hub/0.1',
+  };
+  const fromPeer = (peerIp: string, body: string) =>
+    s.mcp!.request('http://10.43.0.105:8081/mcp', { method: 'POST', body, headers: hubHeaders }, { remoteAddress: peerIp });
+  const add = rpc('tools/call', { name: 'add_questions', arguments: { items: [{ type: 'true_false', prompt: 'Ionic bonds transfer electrons', correct: true, tags: ['chemistry > bonds'] }] } });
+
+  const ok = await fromPeer('10.42.0.57', add);
+  assert.equal(ok.status, 200);
+  assert.ok(!(await ok.json()).result.isError);
+  assert.equal((app.db.prepare('SELECT actor FROM audit_log ORDER BY id DESC LIMIT 1').get() as { actor: string }).actor, 'agent:hub/orbit-hub');
+  assert.equal((await fromPeer('::ffff:10.42.3.200', rpc('tools/list'))).status, 200, 'IPv4-mapped pod address');
+  assert.equal((await fromPeer('10.42.0.1', rpc('tools/list'))).status, 200, 'the node (tunnel) still works');
+
+  for (const untrusted of ['10.43.0.9', '192.168.0.10', '10.41.255.255', '']) {
+    const r = await fromPeer(untrusted, rpc('tools/list'));
+    assert.equal(r.status, 403, untrusted);
+    assert.deepEqual(await r.json(), { error: 'HTTPS is required.' });
+  }
+
+  // The UI listener is unchanged: only the exact node address may claim HTTPS.
+  const ui = (peerIp: string) =>
+    s.ui.request('http://10.43.0.105:8080/api/session', { headers: { host: 'socrates.example.ts.net', 'x-forwarded-proto': 'https' } }, { remoteAddress: peerIp });
+  assert.equal((await ui('10.42.0.1')).status, 200);
+  assert.equal((await ui('10.42.0.57')).status, 403);
+
+  // Configuration guards.
+  assert.equal(loadConfig(deployedEnv).mcpTrustedProxies.join(), PROXY, 'defaults to SOCRATES_TRUSTED_PROXY');
+  for (const bad of ['0.0.0.0/0', '10.0.0.0/7', 'not-an-ip', '10.42.0.0/16/1', '10.42.0.0/x'])
+    assert.throws(() => loadConfig({ ...deployedEnv, SOCRATES_MCP_TRUSTED_PROXY: bad }), /SOCRATES_MCP_TRUSTED_PROXY/, bad);
+  const { SOCRATES_OAUTH_ISSUER, SOCRATES_MCP_PORT, ...noOauth } = deployedEnv;
+  assert.throws(() => loadConfig({ ...noOauth, SOCRATES_MCP_TRUSTED_PROXY: '10.42.0.0/16' }), /only applies to the OAuth MCP listener/);
+});

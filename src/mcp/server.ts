@@ -69,10 +69,11 @@ type Access = keyof typeof SCOPES;
  */
 export function buildMcpServer(app: App, opts: { fallbackClient?: string; scopes?: ReadonlySet<string>; via?: string | null } = {}) {
   const server = new McpServer({ name: 'socrates', version: '0.1.0' }, { instructions: INSTRUCTIONS });
-  // Calls relayed by Orbit Hub (token `act` claim) are recorded as agent:hub/<client>, so Agent activity shows the route.
+  // Calls relayed by Orbit Hub (token `act` claim) are recorded as agent:hub/<act.sub>, so Agent activity shows the route.
   const actor = () => {
     const client = server.server.getClientVersion()?.name ?? opts.fallbackClient ?? 'unknown';
-    return opts.via ? `agent:hub/${client}` : `agent:${client}`;
+    // The delegating party comes from the signed token (act.sub, e.g. "orbit-hub"), not from a header.
+    return opts.via ? `agent:hub/${opts.via.replace(/[^\w.-]/g, '').slice(0, 40) || 'unknown'}` : `agent:${client}`;
   };
   const allowed = (access: Access) => !opts.scopes || opts.scopes.has(SCOPES[access]);
   const denied = (access: Access) => fail(`This tool needs the ${SCOPES[access]} scope. Reconnect and grant it.`);
